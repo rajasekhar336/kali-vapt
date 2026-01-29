@@ -23,9 +23,11 @@ OUTPUT_DIR='/var/log/output'
 LOG_FILE='/var/production/logs/execution.log'
 ZAP_DOCKER_IMAGE='ghcr.io/zaproxy/zaproxy:stable'
 ZAP_TIMEOUT_MINUTES=30
-MAX_PARALLEL_SCANS=3
+MAX_PARALLEL_SCANS=1  # Reduced to prevent resource exhaustion
 SCAN_TIMEOUT=600
 RATE_LIMIT=100
+DOCKER_CPU_LIMIT="1.5"
+DOCKER_MEMORY_LIMIT="2g"
 
 # Enhanced banner
 banner() {
@@ -166,7 +168,7 @@ run_docker() {
     local container_name="vapt-$(uuidgen | head -c 8)"
     
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo -e "${YELLOW}[DRY-RUN]${NC} docker run --rm -v \"${OUTPUT_DIR}/${TARGET_DOMAIN}:/data\" \"$DOCKER_IMAGE\" bash -c \"$cmd\""
+        echo -e "${YELLOW}[DRY-RUN]${NC} docker run --rm -v \"${OUTPUT_DIR}:/data\" \"$DOCKER_IMAGE\" bash -c \"$cmd\""
         return 0
     fi
     
@@ -176,6 +178,8 @@ run_docker() {
     
     set -o pipefail
     docker run --rm \
+        --cpus="${DOCKER_CPU_LIMIT}" \
+        --memory="${DOCKER_MEMORY_LIMIT}" \
         --privileged \
         --cap-add=NET_RAW \
         --cap-add=NET_ADMIN \
@@ -249,24 +253,41 @@ run_recon() {
     log_ok "Reconnaissance completed"
 }
 
-# Phase 2: NETWORK SCANNING (Enhanced)
+# Phase 2: NETWORK SCANNING (Serialized for resource management)
 run_network() {
-    log_info "Starting Phase 2: NETWORK SCANNING"
+    track_progress 8 2 "Network Scanning"
+    log_info "Starting Phase 2: NETWORK SCANNING (Serialized)"
     
-    # Parallel port discovery
-    run_parallel \
-        "naabu -host ${TARGET_DOMAIN} -o network/naabu.txt -json" \
-        "rustscan -a ${TARGET_DOMAIN} -r 1-65535 --ulimit 5000 -- -sV -oX network/rustscan.xml"
+    # Test masscan reliability first
+    local masscan_enabled=true
+    if ! run_docker "masscan --ping 8.8.8.8 --rate=100 2>/dev/null" >/dev/null 2>&1; then
+        log_warn "Masscan disabled - Docker raw socket support unreliable"
+        masscan_enabled=false
+    fi
+    
+    # Sequential port discovery to prevent resource exhaustion
+    log_info "Running naabu for port discovery with JSON output..."
+    run_docker "naabu -host ${TARGET_DOMAIN} -o network/naabu.txt -json"
+    
+    log_info "Running rustscan for ultra-fast port scanning..."
+    run_docker "rustscan -a ${TARGET_DOMAIN} -r 1-65535 --ulimit 5000 -- -sV -oX network/rustscan.xml"
     
     # Service discovery
-    run_with_retry "jq -r '.host + ":" + (.port|tostring)' network/naabu.txt 2>/dev/null | httpx -o network/httpx.txt || true"
+    run_with_retry "jq -r '.host + \":\" + (.port|tostring)' network/naabu.txt 2>/dev/null | httpx -o network/httpx.txt || true"
     
-    # Individual IP scanning with enhanced error handling
+    # Individual IP scanning with enhanced error handling (serialized)
     run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
     
-    # Masscan with fallback
-    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} masscan \$ip -p1-65535 --rate=${RATE_LIMIT} -oL network/masscan_\${ip//./_}.txt 2>/dev/null || echo \"Masscan requires additional privileges - using nmap port scan as fallback\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
+    # Masscan with dynamic enable/disable
+    if [[ "$masscan_enabled" == "true" ]]; then
+        log_info "Running masscan for fast port discovery..."
+        run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} masscan \$ip -p1-65535 --rate=${RATE_LIMIT} -oL network/masscan_\${ip//./_}.txt 2>/dev/null || echo \"Masscan failed for \$ip, using nmap fallback\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
+    else
+        log_info "Masscan disabled, using nmap for comprehensive port scanning"
+        run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json); do echo \"Nmap comprehensive scan for IP: \$ip\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
+    fi
     
+    monitor_resources "Network Scanning"
     log_ok "Network scanning completed"
 }
 
@@ -345,8 +366,12 @@ run_web() {
                 fi
             done < "${OUTPUT_DIR}/web/zap_targets.txt"
             
-            # Combine all ZAP results with better error handling
-            run_docker "ls /zap/wrk/zap_*.json 2>/dev/null | head -1 | xargs cat 2>/dev/null | jq '.' > /zap/wrk/zap.json || echo '[]' > /zap/wrk/zap.json"
+            # Combine all ZAP results - aggregate on host side
+            if ls "${OUTPUT_DIR}/web"/zap_*.json 1>/dev/null 2>&1; then
+                jq -s '.' "${OUTPUT_DIR}/web"/zap_*.json > "${OUTPUT_DIR}/web/zap.json" 2>/dev/null || echo '[]' > "${OUTPUT_DIR}/web/zap.json"
+            else
+                echo '[]' > "${OUTPUT_DIR}/web/zap.json"
+            fi
         else
             log_info "Main domain accessible (status: $domain_status), running ZAP on main domain"
             timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
@@ -389,8 +414,8 @@ run_database() {
     log_info "Creating SQLMap targets from discovered URLs with parameters..."
     run_docker "grep '?' web/katana.txt | sort -u > database/sqlmap_targets.txt"
     
-    log_info "Running sqlmap on parameterized URLs with hardened settings..."
-    run_docker "for url in \$(cat database/sqlmap_targets.txt); do echo \"SQLMap scanning: \$url\" && python3 /opt/tools/sqlmap/sqlmap.py -u \"\$url\" --batch --level=2 --risk=1 --threads=2 --timeout=10 --retries=1 --random-agent --flush-session --output-dir=database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g') || echo \"No SQL injection found for \$url\" > database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done"
+    log_info "Running sqlmap on parameterized URLs with safe settings..."
+    run_docker "for url in \$(cat database/sqlmap_targets.txt); do echo \"SQLMap scanning: \$url\" && python3 /opt/tools/sqlmap/sqlmap.py -u \"\$url\" --batch --level=2 --risk=1 --threads=1 --timeout=5 --retries=1 --random-agent --flush-session --tamper=space2comment --output-dir=database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g') || echo \"No SQL injection found for \$url\" > database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done"
     
     log_info "Checking database ports..."
     run_docker "nmap -sV -p 3306,5432,6379,1433,1521 ${TARGET_DOMAIN} -oA database/db_ports"
@@ -689,22 +714,22 @@ EOF"
     esac
     
     log_ok "VAPT assessment completed successfully!"
-    log_info "Results available in: ${OUTPUT_DIR}/${TARGET_DOMAIN}"
-    log_info "Executive summary: ${OUTPUT_DIR}/${TARGET_DOMAIN}/executive_summary.txt"
-    log_info "HTML report: ${OUTPUT_DIR}/${TARGET_DOMAIN}/report/vapt_report.html"
+    log_info "Results available in: ${OUTPUT_DIR}"
+    log_info "Executive summary: ${OUTPUT_DIR}/executive_summary.txt"
+    log_info "HTML report: ${OUTPUT_DIR}/vapt_report.html"
     
     # Display summary
     echo ""
     echo -e "${CYAN}=== ASSESSMENT SUMMARY ===${NC}"
     echo -e "Target: ${GREEN}${TARGET_DOMAIN}${NC}"
     echo -e "Mode: ${GREEN}${EXECUTION_MODE}${NC}"
-    echo -e "Output: ${GREEN}${OUTPUT_DIR}/${TARGET_DOMAIN}${NC}"
+    echo -e "Output: ${GREEN}${OUTPUT_DIR}${NC}"
     echo ""
     echo -e "${CYAN}Key Metrics:${NC}"
-    echo -e "- Subdomains: $(cat "${OUTPUT_DIR}/${TARGET_DOMAIN}/recon/amass.txt" 2>/dev/null | wc -l || echo "0")"
-    echo -e "- Open Ports: $(cat "${OUTPUT_DIR}/${TARGET_DOMAIN}/network/naabu.txt" 2>/dev/null | wc -l || echo "0")"
-    echo -e "- URLs Crawled: $(cat "${OUTPUT_DIR}/${TARGET_DOMAIN}/web/katana.txt" 2>/dev/null | wc -l || echo "0")"
-    echo -e "- Vulnerabilities: $(grep -c "critical\|high\|medium" "${OUTPUT_DIR}/${TARGET_DOMAIN}/vuln/nuclei.txt" 2>/dev/null || echo "0")"
+    echo -e "- Subdomains: $(cat "${OUTPUT_DIR}/recon/amass.txt" 2>/dev/null | wc -l || echo "0")"
+    echo -e "- Open Ports: $(cat "${OUTPUT_DIR}/network/naabu.txt" 2>/dev/null | wc -l || echo "0")"
+    echo -e "- URLs Crawled: $(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0")"
+    echo -e "- Vulnerabilities: $(grep -c "critical\|high\|medium" "${OUTPUT_DIR}/vuln/nuclei.txt" 2>/dev/null || echo "0")"
     echo ""
     echo -e "${GREEN}✓ Enhanced VAPT Engine v2.3 - Complete!${NC}"
 }
