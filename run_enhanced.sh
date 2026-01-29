@@ -345,8 +345,8 @@ run_web() {
                 fi
             done < "${OUTPUT_DIR}/web/zap_targets.txt"
             
-            # Combine all ZAP results
-            run_docker "cat /zap/wrk/zap_*.json 2>/dev/null | jq -s 'add' > /zap/wrk/zap.json || echo '[]' > /zap/wrk/zap.json"
+            # Combine all ZAP results with better error handling
+            run_docker "ls /zap/wrk/zap_*.json 2>/dev/null | head -1 | xargs cat 2>/dev/null | jq '.' > /zap/wrk/zap.json || echo '[]' > /zap/wrk/zap.json"
         else
             log_info "Main domain accessible (status: $domain_status), running ZAP on main domain"
             timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
