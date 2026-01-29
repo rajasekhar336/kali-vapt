@@ -23,6 +23,9 @@ OUTPUT_DIR='/var/log/output'
 LOG_FILE='/var/production/logs/execution.log'
 ZAP_DOCKER_IMAGE='ghcr.io/zaproxy/zaproxy:stable'
 ZAP_TIMEOUT_MINUTES=30
+MAX_PARALLEL_SCANS=3
+SCAN_TIMEOUT=600
+RATE_LIMIT=100
 
 # Enhanced banner
 banner() {
@@ -84,6 +87,79 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"
 }
 
+# Resource monitoring wrapper
+monitor_resources() {
+    local phase_name="$1"
+    log_info "Resource usage for $phase_name:"
+    
+    # Docker container stats
+    if command -v docker &> /dev/null; then
+        docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}" | grep vapt || true
+    fi
+    
+    # System resources
+    echo "Memory: $(free -h | grep Mem)"
+    echo "Disk: $(df -h /var/log/output | tail -1)"
+}
+
+# Progress tracking
+track_progress() {
+    local total_steps="$1"
+    local current_step="$2"
+    local phase_name="$3"
+    
+    local progress=$((current_step * 100 / total_steps))
+    echo -e "${CYAN}[PROGRESS]${NC} $phase_name: $progress% ($current_step/$total_steps)"
+}
+
+# Enhanced error handling wrapper
+run_with_retry() {
+    local cmd="$1"
+    local max_retries=${2:-3}
+    local retry_delay=${3:-5}
+    local attempt=1
+    
+    while [[ $attempt -le $max_retries ]]; do
+        if run_docker "$cmd"; then
+            return 0
+        else
+            log_warn "Attempt $attempt failed for: $cmd"
+            if [[ $attempt -lt $max_retries ]]; then
+                log_info "Retrying in $retry_delay seconds..."
+                sleep $retry_delay
+            fi
+            ((attempt++))
+        fi
+    done
+    
+    log_error "Command failed after $max_retries attempts: $cmd"
+    return 1
+}
+
+# Parallel execution wrapper
+run_parallel() {
+    local commands=("$@")
+    local pids=()
+    
+    for cmd in "${commands[@]}"; do
+        (
+            run_docker "$cmd"
+        ) &
+        pids+=("$!")
+        
+        # Limit parallel processes
+        if [[ ${#pids[@]} -ge $MAX_PARALLEL_SCANS ]]; then
+            wait "${pids[0]}"
+            pids=("${pids[@]:1}")
+        fi
+    done
+    
+    # Wait for remaining processes
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
+}
+
 # Docker execution wrapper
 run_docker() {
     local cmd="$1"
@@ -104,7 +180,9 @@ run_docker() {
         --cap-add=NET_RAW \
         --cap-add=NET_ADMIN \
         --cap-add=SYS_ADMIN \
+        --cap-add=NET_BIND_SERVICE \
         --device=/dev/net/tun \
+        --sysctl net.ipv4.ip_forward=1 \
         -v "${OUTPUT_DIR}:/data" \
         --name "$container_name" \
         "$DOCKER_IMAGE" \
@@ -129,7 +207,6 @@ init_directories() {
     mkdir -p "${OUTPUT_DIR}"/{recon,network,vuln,web,ssl,database,container,report,raw}
     mkdir -p /var/production/logs
     touch "$LOG_FILE"
-    
     # Set proper permissions
     chown -R 1001:1001 "${OUTPUT_DIR}" 2>/dev/null || true
     chown 1001:1001 "$LOG_FILE" 2>/dev/null || true
@@ -143,94 +220,75 @@ init_directories() {
     log_info "Log file: $LOG_FILE"
 }
 
-# Phase 1: RECONNAISSANCE
+# Phase 1: RECONNAISSANCE (Optimized)
 run_recon() {
     log_info "Starting Phase 1: RECONNAISSANCE"
     
-    log_info "Running amass with timeout..."
-    run_docker "timeout 300 amass enum -d ${TARGET_DOMAIN} -o recon/amass.txt -passive" || {
-        log_info "Amass timeout or failed, trying passive mode only"
-        run_docker "amass enum -d ${TARGET_DOMAIN} -o recon/amass.txt -passive -src || echo '${TARGET_DOMAIN}' > recon/amass.txt"
-    }
+    # Parallel subdomain discovery
+    run_parallel \
+        "timeout 300 amass enum -d ${TARGET_DOMAIN} -o recon/amass.txt -passive || echo '${TARGET_DOMAIN}' > recon/amass.txt" \
+        "assetfinder ${TARGET_DOMAIN} | tee recon/assetfinder.txt" \
+        "subfinder -d ${TARGET_DOMAIN} -o recon/subfinder.txt || echo '${TARGET_DOMAIN}' > recon/subfinder.txt"
     
-    # Fallback to main domain if no subdomains found
+    # Parallel information gathering
+    run_parallel \
+        "whois ${TARGET_DOMAIN} > recon/whois.txt || echo 'Whois information not available' > recon/whois.txt" \
+        "dnsrecon -d ${TARGET_DOMAIN} -j recon/dnsrecon.json" \
+        "dig ${TARGET_DOMAIN} A AAAA MX TXT NS > recon/dig.txt" \
+        "whatweb https://${TARGET_DOMAIN} > recon/whatweb.txt || echo 'WhatWeb scan failed' > recon/whatweb_error.txt"
+    
+    # Parallel URL discovery
+    run_parallel \
+        "waybackurls ${TARGET_DOMAIN} > recon/waybackurls.txt" \
+        "gau ${TARGET_DOMAIN} > recon/gau.txt"
+    
+    # Fallback logic
     run_docker "if [[ ! -s recon/amass.txt ]]; then echo 'No subdomains found by amass, using main domain as fallback' && echo '${TARGET_DOMAIN}' > recon/amass.txt; fi"
-    
-    log_info "Running assetfinder..."
-    run_docker "assetfinder ${TARGET_DOMAIN} | tee recon/assetfinder.txt"
-    
-    log_info "Running subfinder..."
-    run_docker "subfinder -d ${TARGET_DOMAIN} -o recon/subfinder.txt"
-    
-    # Fallback to main domain if no subdomains found
     run_docker "if [[ ! -s recon/subfinder.txt ]]; then echo 'No subdomains found by subfinder, using main domain as fallback' && echo '${TARGET_DOMAIN}' > recon/subfinder.txt; fi"
-    
-    log_info "Running whois..."
-    run_docker "whois ${TARGET_DOMAIN} > recon/whois.txt || echo 'Whois information not available' > recon/whois.txt"
-    
-    log_info "Running dnsrecon..."
-    run_docker "dnsrecon -d ${TARGET_DOMAIN} -j recon/dnsrecon.json"
-    
-    log_info "Running dig for comprehensive DNS enumeration..."
-    run_docker "dig ${TARGET_DOMAIN} A AAAA MX TXT NS > recon/dig.txt"
-    
-    log_info "Running whatweb..."
-    run_docker "whatweb https://${TARGET_DOMAIN} > recon/whatweb.txt || echo 'WhatWeb scan failed' > recon/whatweb_error.txt"
-    
-    log_info "Running enhanced path discovery..."
-    run_docker "curl -s -I https://${TARGET_DOMAIN} | head -1"
-    
-    log_info "Running waybackurls..."
-    run_docker "waybackurls ${TARGET_DOMAIN} > recon/waybackurls.txt"
-    
-    log_info "Running gau (Get All URLs)..."
-    run_docker "gau ${TARGET_DOMAIN} > recon/gau.txt"
     
     log_ok "Reconnaissance completed"
 }
 
-# Phase 2: NETWORK SCANNING
+# Phase 2: NETWORK SCANNING (Enhanced)
 run_network() {
     log_info "Starting Phase 2: NETWORK SCANNING"
     
-    log_info "Running naabu for port discovery with JSON output..."
-    run_docker "naabu -host ${TARGET_DOMAIN} -o network/naabu.txt -json"
+    # Parallel port discovery
+    run_parallel \
+        "naabu -host ${TARGET_DOMAIN} -o network/naabu.txt -json" \
+        "rustscan -a ${TARGET_DOMAIN} -r 1-65535 --ulimit 5000 -- -sV -oX network/rustscan.xml"
     
-    log_info "Running httpx for HTTP service discovery with reliable parsing..."
-    run_docker "jq -r '.host + \":\" + (.port|tostring)' network/naabu.txt 2>/dev/null | httpx -o network/httpx.txt || true"
+    # Service discovery
+    run_with_retry "jq -r '.host + ":" + (.port|tostring)' network/naabu.txt 2>/dev/null | httpx -o network/httpx.txt || true"
     
-    log_info "Running nmap comprehensive scan with OS detection on all discovered IPs..."
-    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
+    # Individual IP scanning with enhanced error handling
+    run_docker "for ip in \$(jq -r '.[] | select(.type=="A") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
     
-    log_info "Running masscan for fast port discovery with rate control on all discovered IPs..."
-    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && masscan \$ip -p1-65535 --rate=500 -oL network/masscan_\${ip//./_}.txt || echo \"Masscan requires root privileges for raw sockets\" > network/masscan_error_\${ip//./_}.txt; done"
-    
-    log_info "Running rustscan for ultra-fast port scanning..."
-    run_docker "rustscan -a ${TARGET_DOMAIN} -r 1-65535 --ulimit 5000 -- -sV -oX network/rustscan.xml"
+    # Masscan with fallback
+    run_docker "for ip in \$(jq -r '.[] | select(.type=="A") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} masscan \$ip -p1-65535 --rate=${RATE_LIMIT} -oL network/masscan_\${ip//./_}.txt 2>/dev/null || echo \"Masscan requires additional privileges - using nmap port scan as fallback\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
     
     log_ok "Network scanning completed"
 }
 
-# Phase 3: VULNERABILITY ASSESSMENT
+# Phase 3: VULNERABILITY ASSESSMENT (Optimized)
 run_vulnerability() {
+    track_progress 8 3 "Vulnerability Assessment"
     log_info "Starting Phase 3: VULNERABILITY ASSESSMENT"
     
     # Create nuclei targets from web discoveries
     log_info "Creating nuclei targets from discovered URLs..."
-    run_docker "echo 'https://${TARGET_DOMAIN}' > vuln/nuclei_targets.txt && if [[ -f web/katana_targets.txt ]]; then grep -E '^https://' web/katana_targets.txt | sort -u >> vuln/nuclei_targets.txt; fi"
+    run_docker "if [[ -f web/katana_targets.txt ]]; then cp web/katana_targets.txt vuln/nuclei_targets.txt; else echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt; fi"
     
-    log_info "Running nuclei on all discovered URLs..."
-    run_docker "for url in \$(cat vuln/nuclei_targets.txt); do echo \"Nuclei scanning: \$url\" && nuclei -u \"\$url\" -severity critical,high,medium -o vuln/nuclei_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt || echo \"No vulnerabilities found for \$url\" > vuln/nuclei_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done"
+    # Parallel vulnerability scanning
+    run_parallel \
+        "for url in \$(cat vuln/nuclei_targets.txt); do echo \"Nuclei scanning: \$url\" && nuclei -u \"\$url\" -severity critical,high,medium -o vuln/nuclei_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt || echo \"No vulnerabilities found for \$url\" > vuln/nuclei_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done" \
+        "for xml_file in network/nmap_comprehensive_*.xml; do if [[ -f \"\$xml_file\" ]]; then echo \"Processing \$xml_file\" && searchsploit --nmap \"\$xml_file\" >> vuln/searchsploit.txt; fi; done || echo 'No nmap XML files found for searchsploit' > vuln/searchsploit_error.txt" \
+        "nmap -sV --script vulners ${TARGET_DOMAIN} -oX vuln/nmap_vulners.xml || echo 'No nmap vulners results' > vuln/nmap_vulners.txt"
     
-    # Combine all nuclei results
+    # Combine results
     run_docker "cat vuln/nuclei_*.txt 2>/dev/null | grep -v 'No vulnerabilities found' | sort -u > vuln/nuclei.txt || echo 'No vulnerabilities found' > vuln/nuclei.txt"
     
-    log_info "Running searchsploit for exploit research based on nmap results..."
-    run_docker "apt-get update -qq && apt-get install -y libxml2-utils >/dev/null 2>&1; for xml_file in network/nmap_comprehensive_*.xml; do if [[ -f \"\$xml_file\" ]]; then echo \"Processing \$xml_file\" && searchsploit --nmap \"\$xml_file\" >> vuln/searchsploit.txt; fi; done || echo 'No nmap XML files found for searchsploit' > vuln/searchsploit_error.txt"
-    
-    log_info "Running nmap vulners script..."
-    run_docker "nmap -sV --script vulners ${TARGET_DOMAIN} -oX vuln/nmap_vulners.xml || echo 'No nmap vulners results' > vuln/nmap_vulners.txt"
-    
+    monitor_resources "Vulnerability Assessment"
     log_ok "Vulnerability assessment completed"
     log_info "Nuclei targets scanned: $(cat "${OUTPUT_DIR}/vuln/nuclei_targets.txt" 2>/dev/null | wc -l || echo "0")"
 }
@@ -243,10 +301,10 @@ run_web() {
     run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o web/gobuster.txt"
     
     log_info "Running katana on discovered URLs..."
-    run_docker "echo 'https://${TARGET_DOMAIN}' > web/katana_targets.txt && grep -E '^/' web/gobuster.txt | grep -v 'Status: 403' | awk '{print \$1}' | sed 's|[^/]$|\\&/|' | grep -v -E '\\.(php|html)$' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sort -u >> web/katana_targets.txt && for url in \$(cat web/katana_targets.txt); do echo \"Scanning: \$url\" && katana -u \"\$url\" -o web/katana_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done && cat web/katana_*.txt > web/katana.txt 2>/dev/null || echo 'No katana results' > web/katana.txt"
+    run_docker "echo 'https://${TARGET_DOMAIN}/' > web/katana_targets.txt && grep -E '^/' web/gobuster.txt | grep -v 'Status: 403' | awk '{print \$1}' | sed 's|/$||' | grep -v -E '\\.(php|html|htm|css|js|jpg|png|gif|ico)$' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' | sort -u >> web/katana_targets.txt && for url in \$(cat web/katana_targets.txt); do echo \"Scanning: \$url\" && katana -u \"\$url\" -o web/katana_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').txt; done && cat web/katana_*.txt > web/katana.txt 2>/dev/null || echo 'No katana results' > web/katana.txt"
     
     log_info "Running nikto on all discovered URLs..."
-    run_docker "echo 'https://${TARGET_DOMAIN}' > web/nikto_targets.txt && if [[ -f web/katana_targets.txt ]]; then grep -E '^https://' web/katana_targets.txt | sort -u >> web/nikto_targets.txt; fi && for url in \$(cat web/nikto_targets.txt); do echo \"Nikto scanning: \$url\" && nikto -h \"\$url\" -o web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt || echo \"No nikto results for \$url\" > web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done"
+    run_docker "if [[ -f web/katana_targets.txt ]]; then cp web/katana_targets.txt web/nikto_targets.txt; else echo 'https://${TARGET_DOMAIN}/' > web/nikto_targets.txt; fi && for url in \$(cat web/nikto_targets.txt); do echo \"Nikto scanning: \$url\" && nikto -h \"\$url\" -o web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').txt || echo \"No nikto results for \$url\" > web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').txt; done"
     
     log_info "Running ffuf for fuzzing..."
     run_docker "ffuf -u \"https://${TARGET_DOMAIN}/FUZZ\" -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o web/ffuf.json -of json || echo 'No ffuf results' > web/ffuf.txt"
@@ -341,7 +399,7 @@ run_reporting() {
     
     # Create executive summary
     log_info "Generating executive summary..."
-    cat > "${OUTPUT_DIR}/${TARGET_DOMAIN}/executive_summary.txt" << EOF
+    cat > "${OUTPUT_DIR}/executive_summary.txt" << EOF
 VAPT Assessment Executive Summary
 ==================================
 Target: ${TARGET_DOMAIN}
@@ -382,7 +440,7 @@ EOF
     
     # Generate HTML report
     log_info "Generating HTML report..."
-    cat > "${OUTPUT_DIR}/${TARGET_DOMAIN}/report/vapt_report.html" << EOF
+    cat > "${OUTPUT_DIR}/vapt_report.html" << 'EOF'
 <!DOCTYPE html>
 <html>
 <head>
