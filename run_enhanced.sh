@@ -275,9 +275,9 @@ run_vulnerability() {
     track_progress 8 3 "Vulnerability Assessment"
     log_info "Starting Phase 3: VULNERABILITY ASSESSMENT"
     
-    # Create nuclei targets from web discoveries
+    # Create nuclei targets from gobuster results
     log_info "Creating nuclei targets from discovered URLs..."
-    run_docker "if [[ -f web/katana_targets.txt ]]; then cp web/katana_targets.txt vuln/nuclei_targets.txt; else echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt; fi"
+    run_docker "echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt && grep -E '^/' web/gobuster.txt 2>/dev/null | grep -v 'Status: 403' | awk '{print \$1}' | sed 's|/$||' | grep -v -E '\\.(php|html|htm|css|js|jpg|png|gif|ico)$' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' | sort -u >> vuln/nuclei_targets.txt || echo 'Using main domain only' && echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt"
     
     # Parallel vulnerability scanning
     run_parallel \
