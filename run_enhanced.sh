@@ -262,10 +262,10 @@ run_network() {
     run_with_retry "jq -r '.host + ":" + (.port|tostring)' network/naabu.txt 2>/dev/null | httpx -o network/httpx.txt || true"
     
     # Individual IP scanning with enhanced error handling
-    run_docker "for ip in \$(jq -r '.[] | select(.type=="A") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
+    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
     
     # Masscan with fallback
-    run_docker "for ip in \$(jq -r '.[] | select(.type=="A") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} masscan \$ip -p1-65535 --rate=${RATE_LIMIT} -oL network/masscan_\${ip//./_}.txt 2>/dev/null || echo \"Masscan requires additional privileges - using nmap port scan as fallback\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
+    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json); do echo \"Masscan scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} masscan \$ip -p1-65535 --rate=${RATE_LIMIT} -oL network/masscan_\${ip//./_}.txt 2>/dev/null || echo \"Masscan requires additional privileges - using nmap port scan as fallback\" && nmap -p- \$ip -oN network/masscan_fallback_\${ip//./_}.txt; done"
     
     log_ok "Network scanning completed"
 }
