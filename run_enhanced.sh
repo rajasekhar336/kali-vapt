@@ -317,18 +317,20 @@ run_web() {
     
     log_info "Running OWASP ZAP for comprehensive web security scan..."
     if command -v docker >/dev/null 2>&1; then
-        # Ensure web directory exists and has proper permissions
-        mkdir -p "${OUTPUT_DIR}/web"
-        chmod 755 "${OUTPUT_DIR}/web"
-        
         # Check if main domain returns 404
         log_info "Checking main domain status..."
         domain_status=$(curl -s -o /dev/null -w "%{http_code}" "https://${TARGET_DOMAIN}" || echo "000")
         
         if [[ "$domain_status" == "404" ]]; then
-            log_info "Main domain returns 404, using gobuster URLs for ZAP scanning"
-            # Extract URLs from gobuster results
-            run_docker "grep -E '^/' web/gobuster.txt | grep -v 'Status: 404' | awk '{print \$1}' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' > web/zap_targets.txt || echo 'https://${TARGET_DOMAIN}/' > web/zap_targets.txt"
+            log_info "Main domain returns 404, using katana_targets.txt for ZAP scanning"
+            # Use only katana_targets.txt as input for ZAP
+            if [[ -f "${OUTPUT_DIR}/web/katana_targets.txt" ]]; then
+                cp "${OUTPUT_DIR}/web/katana_targets.txt" "${OUTPUT_DIR}/web/zap_targets.txt"
+                log_info "Using katana targets: $(cat "${OUTPUT_DIR}/web/zap_targets.txt" | wc -l) URLs found"
+            else
+                log_info "katana_targets.txt not found, using main domain only"
+                echo "https://${TARGET_DOMAIN}/" > "${OUTPUT_DIR}/web/zap_targets.txt"
+            fi
             
             # Run ZAP on discovered URLs
             while IFS= read -r url; do
