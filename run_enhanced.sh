@@ -163,7 +163,7 @@ run_parallel() {
 # Docker execution wrapper
 run_docker() {
     local cmd="$1"
-    local container_name="vapt-$(date +%s)"
+    local container_name="vapt-$(uuidgen | head -c 8)"
     
     if [[ "$DRY_RUN" == "true" ]]; then
         echo -e "${YELLOW}[DRY-RUN]${NC} docker run --rm -v \"${OUTPUT_DIR}/${TARGET_DOMAIN}:/data\" \"$DOCKER_IMAGE\" bash -c \"$cmd\""
