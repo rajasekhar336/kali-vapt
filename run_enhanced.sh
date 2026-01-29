@@ -317,12 +317,43 @@ run_web() {
     
     log_info "Running OWASP ZAP for comprehensive web security scan..."
     if command -v docker >/dev/null 2>&1; then
-        timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
-            -v "${OUTPUT_DIR}/web:/zap/wrk/:rw" \
-            "$ZAP_DOCKER_IMAGE" \
-            zap-full-scan.py \
-                -t "https://${TARGET_DOMAIN}" \
-                -J /zap/wrk/zap.json || true
+        # Ensure web directory exists and has proper permissions
+        mkdir -p "${OUTPUT_DIR}/web"
+        chmod 755 "${OUTPUT_DIR}/web"
+        
+        # Check if main domain returns 404
+        log_info "Checking main domain status..."
+        domain_status=$(curl -s -o /dev/null -w "%{http_code}" "https://${TARGET_DOMAIN}" || echo "000")
+        
+        if [[ "$domain_status" == "404" ]]; then
+            log_info "Main domain returns 404, using gobuster URLs for ZAP scanning"
+            # Extract URLs from gobuster results
+            run_docker "grep -E '^/' web/gobuster.txt | grep -v 'Status: 404' | awk '{print \$1}' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' > web/zap_targets.txt || echo 'https://${TARGET_DOMAIN}/' > web/zap_targets.txt"
+            
+            # Run ZAP on discovered URLs
+            while IFS= read -r url; do
+                if [[ -n "$url" ]]; then
+                    log_info "ZAP scanning: $url"
+                    timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
+                        -v "${OUTPUT_DIR}/web:/zap/wrk/:rw" \
+                        --user "$(id -u):$(id -g)" \
+                        --entrypoint "" \
+                        "$ZAP_DOCKER_IMAGE" \
+                        bash -c "mkdir -p /zap/wrk && zap-full-scan.py -t '$url' -J /zap/wrk/zap_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').json" || true
+                fi
+            done < "${OUTPUT_DIR}/web/zap_targets.txt"
+            
+            # Combine all ZAP results
+            run_docker "cat /zap/wrk/zap_*.json 2>/dev/null | jq -s 'add' > /zap/wrk/zap.json || echo '[]' > /zap/wrk/zap.json"
+        else
+            log_info "Main domain accessible (status: $domain_status), running ZAP on main domain"
+            timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
+                -v "${OUTPUT_DIR}/web:/zap/wrk/:rw" \
+                --user "$(id -u):$(id -g)" \
+                --entrypoint "" \
+                "$ZAP_DOCKER_IMAGE" \
+                bash -c "mkdir -p /zap/wrk && zap-full-scan.py -t 'https://${TARGET_DOMAIN}' -J /zap/wrk/zap.json" || true
+        fi
     else
         log_info "Docker not available, creating empty ZAP results"
         echo "[]" > "${OUTPUT_DIR}/web/zap.json"
