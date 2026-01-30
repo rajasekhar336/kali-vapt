@@ -12,6 +12,7 @@ import sys
 import json
 import logging
 import psutil
+import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
 
@@ -45,44 +46,29 @@ def check_memory_usage():
     return memory.percent
 
 def load_model():
-    """Load AI model - fail if not available"""
+    """Connect to Ollama service"""
     global model, tokenizer, use_mock_ai
     
-    try:
-        # Check if model files exist
-        if not os.path.exists('/app/models/model') or not os.path.exists('/app/models/tokenizer'):
-            logger.error("Model files not found - please build with model download")
-            sys.exit(1)
-        
-        logger.info("Loading offline AI model...")
-        
-        # Check available memory
-        memory = psutil.virtual_memory()
-        available_gb = memory.available / 1024 / 1024 / 1024
-        
-        if available_gb < 1.5:
-            logger.error(f"Insufficient memory: {available_gb:.1f}GB (required: 1.5GB+)")
-            sys.exit(1)
-        
-        # Load model
-        from transformers import AutoTokenizer, AutoModelForCausalLM
-        import torch
-        
-        tokenizer = AutoTokenizer.from_pretrained('/app/models/tokenizer')
-        model = AutoModelForCausalLM.from_pretrained(
-            '/app/models/model',
-            torch_dtype=torch.float16,
-            device_map='auto',
-            low_cpu_mem_usage=True
-        )
-        
-        use_mock_ai = False
-        logger.info("Offline AI model loaded successfully ✓")
-        
-    except Exception as e:
-        logger.error(f"Failed to load AI model: {e}")
-        logger.error("Please ensure model is properly downloaded and sufficient memory is available")
-        sys.exit(1)
+    logger.info("Connecting to Ollama service...")
+    
+    # Wait for Ollama to be ready
+    import time
+    max_retries = 30
+    for i in range(max_retries):
+        try:
+            response = requests.get("http://localhost:11434/api/tags", timeout=5)
+            if response.status_code == 200:
+                logger.info("Ollama service is ready ✓")
+                use_mock_ai = False
+                model = "ollama"
+                tokenizer = None
+                return
+        except:
+            logger.info(f"Waiting for Ollama... ({i+1}/{max_retries})")
+            time.sleep(2)
+    
+    logger.error("Failed to connect to Ollama service")
+    sys.exit(1)
 
 def load_schema():
     """Load JSON schema"""
@@ -103,51 +89,108 @@ def load_prompt_template():
         return "Analyze this security tool output and extract findings:"
 
 def normalize_with_ai(tool_name, tool_output, target_domain):
-    """Pure AI normalization using loaded model"""
+    """Real AI normalization using Ollama"""
     try:
         schema = load_schema()
-        prompt_template = load_prompt_template()
         
-        prompt = f"""
-{prompt_template}
+        # Create AI prompt for vulnerability analysis
+        prompt = f"""You are a cybersecurity expert analyzing security tool output. 
 
-Tool: {tool_name}
-Target: {target_domain}
-Raw Output: {tool_output[:1000]}
+TASK: Extract security vulnerabilities and provide structured findings with specific remediation.
 
-Schema: {json.dumps(schema)}
+TOOL: {tool_name}
+TARGET: {target_domain}
 
-Output JSON:
-"""
+RAW OUTPUT:
+{tool_output}
+
+REQUIREMENTS:
+1. Extract ONLY actual security vulnerabilities (ignore informational data)
+2. For each vulnerability, provide:
+   - Severity level (critical/high/medium/low)
+   - Specific endpoint/URL if mentioned
+   - Clear description of the issue
+   - DETAILED and ACTIONABLE remediation steps
+   - CVE numbers if mentioned
+
+REMEDIATION GUIDELINES:
+- Provide specific implementation steps
+- Include code examples where relevant
+- Reference security frameworks (OWASP, NIST)
+- Suggest specific tools or configurations
+- Make remediation practical and implementable
+
+RESPONSE FORMAT: Return valid JSON array with objects following this schema:
+{json.dumps(schema)}
+
+RULES:
+- If no vulnerabilities found, return empty array []
+- Be specific about endpoints and URLs
+- Provide DETAILED remediation steps (not generic advice)
+- Include CVE numbers when available
+- Do not invent vulnerabilities
+- Make remediation specific to the vulnerability type
+
+JSON Response:"""
+
+        logger.info(f"Sending to Ollama for {tool_name} analysis...")
         
-        # Generate response
-        inputs = tokenizer(prompt, return_tensors="pt", max_length=512, truncation=True)
-        outputs = model.generate(
-            inputs.input_ids,
-            max_new_tokens=256,
-            temperature=0.1,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
-        )
+        # Call Ollama API
+        response = requests.post("http://localhost:11434/api/generate", json={
+            "model": "orca-mini:3b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "max_tokens": 1000
+            }
+        }, timeout=30)
         
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if response.status_code != 200:
+            logger.error(f"Ollama API error: {response.status_code}")
+            return []
         
-        # Extract JSON from response
+        ai_response = response.json().get("response", "")
+        logger.info(f"Ollama response received: {len(ai_response)} chars")
+        
+        # Extract JSON from AI response
         try:
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
+            # Look for JSON array in response
+            json_start = ai_response.find('[')
+            json_end = ai_response.rfind(']') + 1
+            
             if json_start != -1 and json_end > json_start:
-                json_str = response[json_start:json_end]
-                finding = json.loads(json_str)
-                return [finding]
-        except Exception as e:
-            logger.error(f"JSON extraction error: {e}")
-        
-        logger.warning("No valid JSON extracted from AI response")
-        return []
+                json_str = ai_response[json_start:json_end]
+                findings = json.loads(json_str)
+                
+                # Validate and enhance findings
+                validated_findings = []
+                for finding in findings:
+                    if isinstance(finding, dict):
+                        # Ensure required fields
+                        finding.setdefault("tool", tool_name)
+                        finding.setdefault("target", target_domain)
+                        finding.setdefault("confidence", "medium")
+                        finding.setdefault("cvss", "")
+                        finding.setdefault("references", "")
+                        finding.setdefault("raw_output", tool_output)
+                        
+                        validated_findings.append(finding)
+                
+                logger.info(f"Ollama processed {len(validated_findings)} findings")
+                return validated_findings
+            else:
+                logger.warning("No JSON array found in Ollama response")
+                return []
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON parsing error: {e}")
+            logger.error(f"Raw AI response: {ai_response[:500]}...")
+            return []
         
     except Exception as e:
-        logger.error(f"AI normalization error: {e}")
+        logger.error(f"Ollama processing error: {e}")
         return []
 
 @app.route('/health', methods=['GET'])
@@ -194,13 +237,26 @@ def normalize_output():
             "target_domain": target_domain,
             "timestamp": datetime.now().isoformat(),
             "findings": findings,
-            "processing_method": "offline_ai"
+            "processing_method": "ollama_ai"
         }
         
-        # Save to file
+        # Save to file (both locations)
         output_file = f"/app/output/{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         with open(output_file, 'w') as f:
             json.dump(output_data, f, indent=2)
+        
+        # Also save to VAPT output directory if exists
+        import glob
+        vapt_dirs = glob.glob("/var/log/output/*_*/")
+        if vapt_dirs:
+            latest_vapt_dir = max(vapt_dirs, key=os.path.getctime)
+            vapt_file = f"{latest_vapt_dir}/orca_{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            try:
+                with open(vapt_file, 'w') as f:
+                    json.dump(output_data, f, indent=2)
+                logger.info(f"Also saved to VAPT directory: {vapt_file}")
+            except Exception as e:
+                logger.warning(f"Could not save to VAPT directory: {e}")
         
         logger.info(f"Processed {len(findings)} findings, saved to {output_file}")
         
@@ -209,7 +265,7 @@ def normalize_output():
                 "success": True,
                 "findings": findings,
                 "count": len(findings),
-                "processing_method": "offline_ai"
+                "processing_method": "ollama_ai"
             })
         else:
             return jsonify({
@@ -217,7 +273,7 @@ def normalize_output():
                 "findings": [],
                 "count": 0,
                 "message": "No security findings detected",
-                "processing_method": "offline_ai"
+                "processing_method": "ollama_ai"
             })
             
     except Exception as e:
@@ -235,7 +291,7 @@ def status():
         "memory_usage": f"{memory.percent}%",
         "memory_available": f"{memory.available/1024/1024/1024:.1f}GB",
         "model_loaded": True,
-        "processing_method": "offline_ai_only",
+        "processing_method": "ollama_ai",
         "timestamp": datetime.now().isoformat()
     })
 

@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  orca-normalizer:
+    build: .
+    container_name: orca-normalizer-prod
+    ports:
+      - "8080:8080"  # Flask API
+      - "11434:11434"  # Ollama API
+    cpus: "1.0"
+    mem_limit: "2g"
+    memswap_limit: "2g"
+    volumes:
+      - ./output:/app/output
+      - ./logs:/app/logs
+      - ollama_data:/root/.ollama
+      - /var/log/output:/var/log/output  # Mount VAPT output directory
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s  # Increased for Ollama startup
+    environment:
+      - PYTHONUNBUFFERED=1
+      - OLLAMA_HOST=0.0.0.0
+      - MODEL_PATH=/app/models
+      - MAX_MEMORY=1800
+      - TOKEN_LIMIT=512
+
+volumes:
+  ollama_data:
+    driver: local

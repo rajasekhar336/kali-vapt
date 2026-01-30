@@ -8,7 +8,7 @@ set -euo pipefail
 # Configuration
 DETECTDOJO_DIR="/var/production/detectdojo"
 DETECTDOJO_CONTAINER="detectdojo-server"
-DETECTDOJO_PORT="80"
+DETECTDOJO_PORT="8081"
 DETECTDOJO_URL="http://localhost:${DETECTDOJO_PORT}"
 
 # Colors

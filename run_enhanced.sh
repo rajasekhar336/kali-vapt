@@ -28,7 +28,7 @@ SCAN_TIMEOUT=600
 RATE_LIMIT=100
 DOCKER_CPU_LIMIT="1.5"
 DOCKER_MEMORY_LIMIT="2g"
-ORCA_SERVICE="/var/production/orca-normalizer/build-and-run.sh"
+ORCA_SERVICE="/var/production/orca-normalizer/orca-docker.sh"
 DETECTDOJO_SERVICE="/var/production/detectdojo/detectdojo-service.sh"
 ENABLE_ORCA_INTEGRATION=true
 ENABLE_DETECTDOJO_INTEGRATION=true
@@ -96,15 +96,12 @@ log_warn() {
 # Orca Integration Functions
 init_orca_service() {
     if [[ "$ENABLE_ORCA_INTEGRATION" == "true" ]]; then
-        log_info "Initializing Orca-Mini-3B service..."
-        if ! "$ORCA_SERVICE" status >/dev/null 2>&1; then
-            log_info "Starting Orca service..."
-            "$ORCA_SERVICE" deploy || {
-                log_warn "Failed to start Orca service, continuing without normalization"
-                ENABLE_ORCA_INTEGRATION=false
-            }
+        log_info "Checking Orca-Mini-3B service status..."
+        if ! curl -s "http://localhost:8080/health" >/dev/null 2>&1; then
+            log_warn "Orca service not running - normalization disabled"
+            ENABLE_ORCA_INTEGRATION=false
         else
-            log_info "Orca service is already running"
+            log_info "Orca service is running and ready"
         fi
     fi
 }
@@ -112,22 +109,12 @@ init_orca_service() {
 # DetectDojo Integration Functions
 init_detectdojo_service() {
     if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-        log_info "Initializing DetectDojo service..."
-        if ! "$DETECTDOJO_SERVICE" health >/dev/null 2>&1; then
-            log_info "Starting DetectDojo service..."
-            "$DETECTDOJO_SERVICE" build || {
-                log_warn "Failed to start DetectDojo service, continuing without correlation"
-                ENABLE_DETECTDOJO_INTEGRATION=false
-            }
+        log_info "Checking DetectDojo service status..."
+        if ! curl -s "http://localhost:8081" >/dev/null 2>&1; then
+            log_warn "DetectDojo service not running - correlation disabled"
+            ENABLE_DETECTDOJO_INTEGRATION=false
         else
-            log_info "DetectDojo service is already running"
-        fi
-        
-        # Initialize product for target domain
-        if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            "$DETECTDOJO_SERVICE" init "$TARGET_DOMAIN" || {
-                log_warn "Failed to initialize DetectDojo product"
-            }
+            log_info "DetectDojo service is running and ready"
         fi
     fi
 }
@@ -178,16 +165,19 @@ start_background_processor() {
     # Start background processor
     (
         while true; do
-            for queue_file in "${OUTPUT_DIR}/processing_queue"/*.tool; do
-                if [[ -f "$queue_file" ]]; then
-                    local tool_name output_file
-                    tool_name=$(basename "$queue_file" .tool)
-                    output_file=$(cat "$queue_file")
-                    
-                    process_tool_output "$tool_name" "$output_file"
-                    rm "$queue_file"
-                fi
-            done
+            # Check if any .tool files exist before processing
+            if ls "${OUTPUT_DIR}/processing_queue"/*.tool >/dev/null 2>&1; then
+                for queue_file in "${OUTPUT_DIR}/processing_queue"/*.tool; do
+                    if [[ -f "$queue_file" ]]; then
+                        local tool_name output_file
+                        tool_name=$(basename "$queue_file" .tool)
+                        output_file=$(cat "$queue_file")
+                        
+                        process_tool_output "$tool_name" "$output_file"
+                        rm "$queue_file" 2>/dev/null || true
+                    fi
+                done
+            fi
             sleep 2
         done
     ) &
@@ -293,33 +283,26 @@ run_docker() {
     local cmd="$1"
     local container_name="vapt-$(uuidgen | head -c 8)"
     
-    if [[ "$DRY_RUN" == "true" ]]; then
-        echo -e "${YELLOW}[DRY-RUN]${NC} docker run --rm -v \"${OUTPUT_DIR}:/data\" \"$DOCKER_IMAGE\" bash -c \"$cmd\""
-        return 0
-    fi
+    # Ensure output directory is writable
+    sudo chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
     
-    if [[ "$VERBOSE" == "true" ]]; then
-        log_info "Executing: $cmd"
-    fi
-    
-    set -o pipefail
     docker run --rm \
+        --name "$container_name" \
         --cpus="${DOCKER_CPU_LIMIT}" \
         --memory="${DOCKER_MEMORY_LIMIT}" \
         --privileged \
         --cap-add=NET_RAW \
         --cap-add=NET_ADMIN \
         --cap-add=SYS_ADMIN \
-        --cap-add=NET_BIND_SERVICE \
-        --device=/dev/net/tun \
-        --sysctl net.ipv4.ip_forward=1 \
-        -v "${OUTPUT_DIR}:/data" \
-        --name "$container_name" \
+        -v "${OUTPUT_DIR}:${OUTPUT_DIR}:rw" \
+        -w "${OUTPUT_DIR}" \
+        --user "$(id -u):$(id -g)" \
+        --entrypoint="" \
         "$DOCKER_IMAGE" \
-        bash -c "cd /data && $cmd" 2>&1 | tee -a "$LOG_FILE" || {
-        log_error "Command failed: $cmd"
-        return 1
-    }
+        bash -c "$cmd" || {
+            log_error "Docker command failed: $cmd"
+            return 1
+        }
 }
 
 # Initialize output directories
@@ -333,21 +316,45 @@ init_directories() {
     OUTPUT_DIR="${OUTPUT_BASE}/${SCAN_ID}"
     LOG_FILE="/var/production/logs/execution_${SCAN_TIMESTAMP}.log"
     
-    # Create full directory tree on host
-    mkdir -p "${OUTPUT_DIR}"/{recon,network,vuln,web,ssl,database,container,report,raw}
-    mkdir -p /var/production/logs
-    touch "$LOG_FILE"
-    # Set proper permissions
-    chown -R 1001:1001 "${OUTPUT_DIR}" 2>/dev/null || true
-    chown 1001:1001 "$LOG_FILE" 2>/dev/null || true
+    # Create base output directory with fallback
+    if ! mkdir -p "$OUTPUT_BASE" 2>/dev/null; then
+        # Try with sudo if user permission fails
+        sudo mkdir -p "$OUTPUT_BASE" 2>/dev/null || {
+            # Fallback to user directory
+            OUTPUT_BASE="$HOME/vapt_output"
+            mkdir -p "$OUTPUT_BASE"
+            log_warn "Using alternative output directory: $OUTPUT_BASE"
+            OUTPUT_DIR="${OUTPUT_BASE}/${SCAN_ID}"
+        }
+    fi
     
-    # Export for use everywhere
-    export SCAN_ID OUTPUT_DIR
+    # Create scan-specific directory with permissions
+    if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
+        sudo mkdir -p "$OUTPUT_DIR" 2>/dev/null || {
+            log_error "Failed to create output directory: $OUTPUT_DIR"
+            exit 1
+        }
+    fi
+    
+    # Ensure proper permissions and ownership
+    sudo chown -R "$(id -u):$(id -g)" "$OUTPUT_DIR" 2>/dev/null || true
+    chmod 755 "$OUTPUT_DIR" 2>/dev/null || sudo chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
+    
+    # Create processing queue directory
+    mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || sudo mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
+    chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || sudo chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
+    
+    # Create scan subdirectories
+    for dir in recon network vuln web ssl database container reports; do
+        mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || sudo mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
+        sudo chown "$(id -u):$(id -g)" "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
+    done
+    
+    # Create log directory
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || sudo mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     
     log_ok "Directories initialized"
-    log_info "Scan ID: ${SCAN_ID}"
-    log_info "Output directory: ${OUTPUT_DIR}"
-    log_info "Log file: $LOG_FILE"
+    log_info "Output directory: $OUTPUT_DIR"
 }
 
 # Phase 1: RECONNAISSANCE (Optimized)
@@ -527,7 +534,7 @@ run_ssl() {
     log_info "Starting Phase 5: SSL/TLS SECURITY"
     
     log_info "Running sslyze..."
-    run_docker "sslyze --certinfo --heartbleed --robot --tlsv1_2 --tlsv1_3 --http_headers --json_out ssl/sslyze.json ${TARGET_DOMAIN}:443"
+    run_docker "sslyze --certinfo --heartbleed --robot --tlsv1_2 --tlsv1_3 --http_headers --json_out ssl/sslyze.json ${TARGET_DOMAIN}:443 || echo '{\"error\": \"sslyze not available\"}' > ssl/sslyze.json"
     
     log_info "Running sslscan..."
     run_docker "sslscan ${TARGET_DOMAIN}:443 > ssl/sslscan.txt"
@@ -786,11 +793,11 @@ main() {
     # Initialize
     init_directories
     
-    # Initialize Orca and DetectDojo services
+    # Check service status (no automatic startup)
     init_orca_service
     init_detectdojo_service
     
-    # Start background processor for parallel tool processing
+    # Start background processor for parallel tool processing (if Orca is running)
     start_background_processor
     
     # Create scan metadata inside container

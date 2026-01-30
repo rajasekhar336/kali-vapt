@@ -70,13 +70,13 @@ build_image() {
     log_info "Building production Orca-Mini-3B image..."
     
     # Check if Dockerfile exists
-    if [[ ! -f "Dockerfile.production" ]]; then
-        log_error "Dockerfile.production not found"
+    if [[ ! -f "Dockerfile" ]]; then
+        log_error "Dockerfile not found"
         exit 1
     fi
     
     # Build image
-    docker build -f Dockerfile.production -t "$IMAGE_NAME" . || {
+    docker build -f Dockerfile -t "$IMAGE_NAME" . || {
         log_error "Failed to build Docker image"
         exit 1
     }
