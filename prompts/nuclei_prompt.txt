@@ -1,0 +1,8 @@
+Normalize this Nuclei output to standard format:
+- Extract CVE, severity, affected URL, description
+- Add specific remediation steps for web vulnerabilities
+- Include CVSS score if available
+- Add reference links (CVE, vendor advisories)
+- Format: Tool|CVE|Severity|Target|Description|Remediation|CVSS|References
+- Focus on web application security fixes
+- Include OWASP references where applicable

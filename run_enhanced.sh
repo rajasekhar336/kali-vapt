@@ -28,6 +28,10 @@ SCAN_TIMEOUT=600
 RATE_LIMIT=100
 DOCKER_CPU_LIMIT="1.5"
 DOCKER_MEMORY_LIMIT="2g"
+ORCA_SERVICE="/var/production/orca-normalizer/build-and-run.sh"
+DETECTDOJO_SERVICE="/var/production/detectdojo/detectdojo-service.sh"
+ENABLE_ORCA_INTEGRATION=true
+ENABLE_DETECTDOJO_INTEGRATION=true
 
 # Enhanced banner
 banner() {
@@ -87,6 +91,128 @@ log_error() {
 
 log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"
+}
+
+# Orca Integration Functions
+init_orca_service() {
+    if [[ "$ENABLE_ORCA_INTEGRATION" == "true" ]]; then
+        log_info "Initializing Orca-Mini-3B service..."
+        if ! "$ORCA_SERVICE" status >/dev/null 2>&1; then
+            log_info "Starting Orca service..."
+            "$ORCA_SERVICE" deploy || {
+                log_warn "Failed to start Orca service, continuing without normalization"
+                ENABLE_ORCA_INTEGRATION=false
+            }
+        else
+            log_info "Orca service is already running"
+        fi
+    fi
+}
+
+# DetectDojo Integration Functions
+init_detectdojo_service() {
+    if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
+        log_info "Initializing DetectDojo service..."
+        if ! "$DETECTDOJO_SERVICE" health >/dev/null 2>&1; then
+            log_info "Starting DetectDojo service..."
+            "$DETECTDOJO_SERVICE" build || {
+                log_warn "Failed to start DetectDojo service, continuing without correlation"
+                ENABLE_DETECTDOJO_INTEGRATION=false
+            }
+        else
+            log_info "DetectDojo service is already running"
+        fi
+        
+        # Initialize product for target domain
+        if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
+            "$DETECTDOJO_SERVICE" init "$TARGET_DOMAIN" || {
+                log_warn "Failed to initialize DetectDojo product"
+            }
+        fi
+    fi
+}
+
+# Process tool output with Orca and DetectDojo
+process_tool_output() {
+    local tool_name="$1"
+    local output_file="$2"
+    
+    if [[ "$ENABLE_ORCA_INTEGRATION" != "true" ]]; then
+        return 0
+    fi
+    
+    if [[ ! -f "$output_file" ]] || [[ ! -s "$output_file" ]]; then
+        return 0
+    fi
+    
+    log_info "Processing $tool_name output with Orca..."
+    
+    # Send to Orca for normalization using new API
+    local normalized_output
+    normalized_output=$(curl -s -X POST "http://localhost:8080/normalize" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"tool_name\": \"$tool_name\",
+            \"tool_output\": \"$(cat "$output_file" | head -c 1000)\",
+            \"target_domain\": \"$TARGET_DOMAIN\"
+        }" 2>/dev/null || echo "")
+    
+    if [[ -n "$normalized_output" ]] && [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
+        # Send to DetectDojo
+        log_info "Sending $tool_name findings to DetectDojo..."
+        echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+    fi
+}
+
+# Background processor for parallel tool output processing
+start_background_processor() {
+    if [[ "$ENABLE_ORCA_INTEGRATION" != "true" ]]; then
+        return 0
+    fi
+    
+    log_info "Starting background Orca processor..."
+    
+    # Create processing queue
+    mkdir -p "${OUTPUT_DIR}/processing_queue"
+    
+    # Start background processor
+    (
+        while true; do
+            for queue_file in "${OUTPUT_DIR}/processing_queue"/*.tool; do
+                if [[ -f "$queue_file" ]]; then
+                    local tool_name output_file
+                    tool_name=$(basename "$queue_file" .tool)
+                    output_file=$(cat "$queue_file")
+                    
+                    process_tool_output "$tool_name" "$output_file"
+                    rm "$queue_file"
+                fi
+            done
+            sleep 2
+        done
+    ) &
+    
+    BACKGROUND_PROCESSOR_PID=$!
+}
+
+# Queue tool for processing
+queue_tool_processing() {
+    local tool_name="$1"
+    local output_file="$2"
+    
+    if [[ "$ENABLE_ORCA_INTEGRATION" == "true" ]] && [[ -f "$output_file" ]]; then
+        echo "$output_file" > "${OUTPUT_DIR}/processing_queue/${tool_name}.tool"
+    fi
+}
+
+# Generate final DetectDojo report
+generate_final_report() {
+    if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
+        log_info "Generating final DetectDojo report..."
+        "$DETECTDOJO_SERVICE" report "$TARGET_DOMAIN" "${OUTPUT_DIR}/detectdojo_report.md" || {
+            log_warn "Failed to generate DetectDojo report"
+        }
+    fi
 }
 
 # Resource monitoring wrapper
@@ -309,6 +435,9 @@ run_vulnerability() {
     # Combine results
     run_docker "cat vuln/nuclei_*.txt 2>/dev/null | grep -v 'No vulnerabilities found' | sort -u > vuln/nuclei.txt || echo 'No vulnerabilities found' > vuln/nuclei.txt"
     
+    # Queue for Orca processing
+    queue_tool_processing "nuclei" "${OUTPUT_DIR}/vuln/nuclei.txt"
+    
     monitor_resources "Vulnerability Assessment"
     log_ok "Vulnerability assessment completed"
     log_info "Nuclei targets scanned: $(cat "${OUTPUT_DIR}/vuln/nuclei_targets.txt" 2>/dev/null | wc -l || echo "0")"
@@ -372,6 +501,9 @@ run_web() {
             else
                 echo '[]' > "${OUTPUT_DIR}/web/zap.json"
             fi
+            
+            # Queue for Orca processing
+            queue_tool_processing "zap" "${OUTPUT_DIR}/web/zap.json"
         else
             log_info "Main domain accessible (status: $domain_status), running ZAP on main domain"
             timeout "${ZAP_TIMEOUT_MINUTES}m" docker run --rm \
@@ -654,6 +786,13 @@ main() {
     # Initialize
     init_directories
     
+    # Initialize Orca and DetectDojo services
+    init_orca_service
+    init_detectdojo_service
+    
+    # Start background processor for parallel tool processing
+    start_background_processor
+    
     # Create scan metadata inside container
     run_docker "cat > scan_metadata.json << EOF
 {
@@ -712,6 +851,17 @@ EOF"
             exit 1
             ;;
     esac
+    
+    # Wait for background processor to complete
+    if [[ -n "${BACKGROUND_PROCESSOR_PID:-}" ]]; then
+        log_info "Waiting for Orca processing to complete..."
+        sleep 10
+        kill "$BACKGROUND_PROCESSOR_PID" 2>/dev/null || true
+        wait "$BACKGROUND_PROCESSOR_PID" 2>/dev/null || true
+    fi
+    
+    # Generate final DetectDojo report
+    generate_final_report
     
     log_ok "VAPT assessment completed successfully!"
     log_info "Results available in: ${OUTPUT_DIR}"

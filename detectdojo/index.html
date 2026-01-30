@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DetectDojo Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .header { background: #2c3e50; color: white; padding: 20px; text-align: center; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; }
+        .success { color: #27ae60; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>DetectDojo Vulnerability Correlation Platform</h1>
+        <p>Demo Version - VAPT Integration</p>
+    </div>
+    
+    <div class="section">
+        <h2>Status: <span class="success">Running</span></h2>
+        <p>DetectDojo service is ready to receive vulnerability findings from Orca-Mini-3B normalization.</p>
+    </div>
+    
+    <div class="section">
+        <h2>API Endpoints:</h2>
+        <ul>
+            <li>POST /api/v2/api-token-auth/ - Authentication</li>
+            <li>POST /api/v2/products/ - Create products</li>
+            <li>POST /api/v2/findings/ - Submit findings</li>
+        </ul>
+    </div>
+    
+    <div class="section">
+        <h2>Integration Status:</h2>
+        <p>✓ Ready to receive normalized findings from Orca-Mini-3B</p>
+        <p>✓ Vulnerability correlation enabled</p>
+        <p>✓ Report generation available</p>
+    </div>
+</body>
+</html>
