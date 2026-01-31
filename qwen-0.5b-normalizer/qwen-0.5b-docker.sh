@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Orca Service Docker Manager
+# Qwen 0.5B Service Docker Manager
 # All Docker operations in one place
 
 set -euo pipefail
@@ -26,13 +26,13 @@ log_error() {
 
 # Docker operations
 start() {
-    log_info "Starting Orca service with Docker Compose..."
-    docker-compose up -d
+    log_info "Starting Qwen 0.5B service with Docker Compose..."
+    docker compose up -d
     log_info "Waiting for service to be ready..."
     sleep 5
     
     if curl -s http://localhost:8080/health >/dev/null 2>&1; then
-        log_info "Orca service is ready! ✓"
+        log_info "Qwen 0.5B service is ready! ✓"
     else
         log_error "Service failed to start"
         return 1
@@ -40,25 +40,25 @@ start() {
 }
 
 stop() {
-    log_info "Stopping Orca service..."
-    docker-compose down
+    log_info "Stopping Qwen 0.5B service..."
+    docker compose down
     log_info "Service stopped"
 }
 
 restart() {
-    log_info "Restarting Orca service..."
-    docker-compose restart
+    log_info "Restarting Qwen 0.5B service..."
+    docker compose restart
     sleep 3
     log_info "Service restarted"
 }
 
 logs() {
-    docker-compose logs -f
+    docker compose logs -f
 }
 
 status() {
-    log_info "Orca Service Status:"
-    docker-compose ps
+    log_info "Qwen 0.5B Service Status:"
+    docker compose ps
     
     if curl -s http://localhost:8080/health >/dev/null 2>&1; then
         log_info "Health: ✓ Running"

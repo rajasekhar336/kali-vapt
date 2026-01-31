@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     jq \
     git \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Ollama
@@ -31,15 +32,15 @@ RUN echo '#!/bin/bash\n\
 echo "Starting Ollama service..."\n\
 ollama serve &\n\
 sleep 5\n\
-echo "Checking for Orca-Mini-3B model..."\n\
-if ollama list | grep -q "orca-mini:3b"; then\n\
-    echo "✓ Orca-Mini-3B model already available"\n\
+echo "Checking for Qwen 0.5B model..."\n\
+if ollama list | grep -q "qwen:0.5b"; then\n\
+    echo "✓ Qwen 0.5B model already available"\n\
 else\n\
-    echo "📥 Downloading Orca-Mini-3B model (1.8GB - one-time download)..."\n\
-    ollama pull orca-mini:3b\n\
+    echo "📥 Downloading Qwen 0.5B model (500MB - one-time download)..."\n\
+    ollama pull qwen:0.5b\n\
     echo "✓ Model download completed"\n\
 fi\n\
-echo "Starting Orca AI Service..."\n\
+echo "Starting Qwen 0.5B AI Service..."\n\
 echo "Memory info:"\n\
 free -h\n\
 echo "Starting Flask API..."\n\

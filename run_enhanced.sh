@@ -28,9 +28,9 @@ SCAN_TIMEOUT=600
 RATE_LIMIT=100
 DOCKER_CPU_LIMIT="1.5"
 DOCKER_MEMORY_LIMIT="2g"
-ORCA_SERVICE="/var/production/orca-normalizer/orca-docker.sh"
+QWEN_SERVICE="/var/production/qwen-0.5b-normalizer/qwen-0.5b-docker.sh"
 DETECTDOJO_SERVICE="/var/production/detectdojo/detectdojo-service.sh"
-ENABLE_ORCA_INTEGRATION=true
+ENABLE_QWEN_INTEGRATION=true
 ENABLE_DETECTDOJO_INTEGRATION=true
 
 # Enhanced banner
@@ -93,15 +93,15 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"
 }
 
-# Orca Integration Functions
-init_orca_service() {
-    if [[ "$ENABLE_ORCA_INTEGRATION" == "true" ]]; then
-        log_info "Checking Orca-Mini-3B service status..."
+# Qwen Integration Functions
+init_qwen_service() {
+    if [[ "$ENABLE_QWEN_INTEGRATION" == "true" ]]; then
+        log_info "Checking Qwen 0.5B service status..."
         if ! curl -s "http://localhost:8080/health" >/dev/null 2>&1; then
-            log_warn "Orca service not running - normalization disabled"
-            ENABLE_ORCA_INTEGRATION=false
+            log_warn "Qwen service not running - normalization disabled"
+            ENABLE_QWEN_INTEGRATION=false
         else
-            log_info "Orca service is running and ready"
+            log_info "Qwen service is running and ready"
         fi
     fi
 }
@@ -132,9 +132,9 @@ process_tool_output() {
         return 0
     fi
     
-    log_info "Processing $tool_name output with Orca..."
+    log_info "Processing $tool_name output with Qwen..."
     
-    # Send to Orca for normalization using new API
+    # Send to Qwen for normalization using new API
     local normalized_output
     normalized_output=$(curl -s -X POST "http://localhost:8080/normalize" \
         -H "Content-Type: application/json" \
@@ -157,7 +157,7 @@ start_background_processor() {
         return 0
     fi
     
-    log_info "Starting background Orca processor..."
+    log_info "Starting background Qwen processor..."
     
     # Create processing queue
     mkdir -p "${OUTPUT_DIR}/processing_queue"
