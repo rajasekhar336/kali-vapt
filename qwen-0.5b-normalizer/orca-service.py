@@ -81,49 +81,22 @@ def load_schema():
         return {}
 
 def normalize_finding(tool_name, tool_output, target_domain):
-    """Step 1: Normalize raw tool output to clean JSON"""
+    """Step 1: Normalize raw tool output using rule-based classification"""
     try:
-        # Load normalization prompt
-        with open('/app/prompts/normalization_prompt.txt', 'r') as f:
-            prompt_template = f.read()
+        logger.info(f"Classifying {tool_name} finding using rules...")
         
-        prompt = prompt_template.replace("{{TOOL}}", tool_name)\
-                               .replace("{{TARGET}}", target_domain)\
-                               .replace("{{RAW}}", tool_output[:2000])  # Limit input size
+        # Use rule-based classifier instead of AI
+        normalized = classify_vulnerability(tool_name, tool_output, target_domain)
         
-        logger.info(f"Normalizing {tool_name} finding...")
-        
-        response = requests.post("http://localhost:11434/api/generate", 
-                                   json={
-                                       "model": "qwen:0.5b",
-                                       "prompt": prompt,
-                                       "stream": False
-                                   }, timeout=30)
-        
-        if response.status_code != 200:
-            logger.error(f"Normalization API error: {response.status_code}")
+        if normalized:
+            logger.info(f"Successfully classified: {normalized.get('issue_type', 'unknown')}")
+            return normalized
+        else:
+            logger.warning("Rule-based classification failed")
             return None
-        
-        ai_response = response.json().get("response", "")
-        
-        # Extract JSON from response
-        try:
-            # Find JSON in the response
-            start_idx = ai_response.find('{')
-            end_idx = ai_response.rfind('}') + 1
-            if start_idx != -1 and end_idx != -1:
-                json_str = ai_response[start_idx:end_idx]
-                normalized = json.loads(json_str)
-                logger.info(f"Successfully normalized finding: {normalized.get('issue_type', 'unknown')}")
-                return normalized
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error in normalization: {e}")
-            logger.debug(f"AI response: {ai_response}")
-        
-        return None
-        
+            
     except Exception as e:
-        logger.error(f"Normalization error: {e}")
+        logger.error(f"Classification error: {e}")
         return None
 
 def generate_remediation(normalized_finding):
@@ -143,7 +116,7 @@ def generate_remediation(normalized_finding):
                                        "model": "qwen:0.5b",
                                        "prompt": prompt,
                                        "stream": False
-                                   }, timeout=30)
+                                   }, timeout=60)
         
         if response.status_code != 200:
             logger.error(f"Remediation API error: {response.status_code}")
@@ -174,7 +147,141 @@ def generate_remediation(normalized_finding):
         logger.error(f"Remediation generation error: {e}")
         return "Remediation: Consult security documentation for proper fix."
 
-def process_with_two_step_flow(tool_name, tool_output, target_domain):
+def process_with_one_step_ai(tool_name, tool_output, target_domain):
+    """One-step AI processing: normalization + remediation together"""
+    findings = []
+    
+    try:
+        # Load one-step prompt
+        with open('/app/prompts/one_step_prompt.txt', 'r') as f:
+            prompt_template = f.read()
+        
+        prompt = prompt_template.replace("{{TOOL}}", tool_name)\
+                               .replace("{{TARGET}}", target_domain)\
+                               .replace("{{RAW}}", tool_output[:2000])  # Limit input
+        
+        logger.info(f"Processing {tool_name} with one-step AI...")
+        
+        response = requests.post("http://localhost:11434/api/generate", 
+                                   json={
+                                       "model": "qwen:0.5b",
+                                       "prompt": prompt,
+                                       "stream": False
+                                   }, timeout=120)
+        
+        if response.status_code != 200:
+            logger.error(f"One-step AI API error: {response.status_code}")
+            return findings
+        
+        ai_response = response.json().get("response", "")
+        
+        # Extract JSON from response
+        try:
+            # Find JSON in the response - look for { and }
+            start_idx = ai_response.find('{')
+            end_idx = ai_response.rfind('}') + 1
+            if start_idx != -1 and end_idx != -1:
+                json_str = ai_response[start_idx:end_idx]
+                # Clean up the JSON string
+                json_str = json_str.replace('```json', '').replace('```', '').strip()
+                # Try to parse JSON
+                result = json.loads(json_str)
+                
+                # Create final finding with AI-generated remediation
+                final_finding = {
+                    "title": result.get("issue", "Unknown Issue"),
+                    "severity": result.get("severity", "medium"),
+                    "cve": "",
+                    "tool": tool_name,
+                    "target": target_domain,
+                    "endpoint": result.get("url", ""),
+                    "description": result.get("description", ""),
+                    "remediation": result.get("remediation", "Follow security best practices."),
+                    "confidence": "medium",
+                    "cvss": "",
+                    "references": f"https://owasp.org/www-project-top-ten/{result.get('issue_type', result.get('issue__type', 'other'))}",
+                    "raw_output": tool_output
+                }
+                
+                findings.append(final_finding)
+                logger.info(f"Successfully processed with one-step AI: {result.get('issue_type', 'unknown')}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in one-step AI: {e}")
+            logger.debug(f"AI response: {ai_response}")
+            logger.debug(f"Extracted JSON string: {json_str if 'json_str' in locals() else 'N/A'}")
+        except Exception as e:
+            logger.error(f"Processing error in one-step AI: {e}")
+            logger.debug(f"AI response: {ai_response}")
+        
+    except Exception as e:
+        logger.error(f"One-step AI processing error: {e}")
+    
+    return findings
+
+def process_with_simple_ai(tool_name, tool_output, target_domain):
+    """Simple single-step AI processing for better Qwen 0.5B results"""
+    findings = []
+    
+    try:
+        # Load simple prompt
+        with open('/app/prompts/simple_prompt.txt', 'r') as f:
+            prompt_template = f.read()
+        
+        prompt = prompt_template.replace("{{TOOL}}", tool_name)\
+                               .replace("{{TARGET}}", target_domain)\
+                               .replace("{{RAW}}", tool_output[:1500])  # Limit input
+        
+        logger.info(f"Processing {tool_name} with simple AI...")
+        
+        response = requests.post("http://localhost:11434/api/generate", 
+                                   json={
+                                       "model": "qwen:0.5b",
+                                       "prompt": prompt,
+                                       "stream": False
+                                   }, timeout=45)
+        
+        if response.status_code != 200:
+            logger.error(f"Simple AI API error: {response.status_code}")
+            return findings
+        
+        ai_response = response.json().get("response", "")
+        
+        # Extract JSON from response
+        try:
+            start_idx = ai_response.find('{')
+            end_idx = ai_response.rfind('}') + 1
+            if start_idx != -1 and end_idx != -1:
+                json_str = ai_response[start_idx:end_idx]
+                result = json.loads(json_str)
+                
+                # Create final finding
+                final_finding = {
+                    "title": result.get("issue", "Unknown Issue"),
+                    "severity": result.get("severity", "medium"),
+                    "cve": "",
+                    "tool": tool_name,
+                    "target": target_domain,
+                    "endpoint": result.get("url", ""),
+                    "description": result.get("description", ""),
+                    "remediation": result.get("remediation", "Follow security best practices."),
+                    "confidence": "medium",
+                    "cvss": "",
+                    "references": "",
+                    "raw_output": tool_output
+                }
+                
+                findings.append(final_finding)
+                logger.info(f"Successfully processed with simple AI: {result.get('issue_type', 'unknown')}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error in simple AI: {e}")
+            logger.debug(f"AI response: {ai_response}")
+        
+    except Exception as e:
+        logger.error(f"Simple AI processing error: {e}")
+    
+    return findings
     """Process tool output using two-step LLM flow"""
     findings = []
     
@@ -185,8 +292,13 @@ def process_with_two_step_flow(tool_name, tool_output, target_domain):
             logger.warning(f"Failed to normalize {tool_name} output")
             return findings
         
-        # Step 2: Generate remediation
-        remediation = generate_remediation(normalized)
+        # Step 2: Generate remediation using rules (not AI)
+        remediation = get_detailed_remediation(
+            normalized.get("issue_type", "security_headers_missing"),
+            normalized.get("issue", ""),
+            normalized.get("url", ""),
+            normalized.get("description", "")
+        )
         
         # Combine into final finding
         final_finding = {
@@ -248,8 +360,8 @@ def normalize_output():
         
         logger.info(f"Processing {tool_name} output for {target_domain}")
         
-        # Process using two-step flow
-        findings = process_with_two_step_flow(tool_name, tool_output, target_domain)
+        # Process using one-step AI (AI handles both normalization and remediation)
+        findings = process_with_one_step_ai(tool_name, tool_output, target_domain)
         
         # Create output data
         output_data = {
@@ -257,15 +369,10 @@ def normalize_output():
             "target_domain": target_domain,
             "timestamp": datetime.now().isoformat(),
             "findings": findings,
-            "processing_method": "qwen_two_step_ai"
+            "processing_method": "qwen_one_step_ai"
         }
         
-        # Save to file (both locations)
-        output_file = f"/app/output/{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(output_file, 'w') as f:
-            json.dump(output_data, f, indent=2)
-        
-        # Also save to VAPT output directory if exists
+        # Save to VAPT output directory only
         import glob
         vapt_dirs = glob.glob("/var/log/output/*_*/")
         if vapt_dirs:
@@ -274,9 +381,18 @@ def normalize_output():
             try:
                 with open(vapt_file, 'w') as f:
                     json.dump(output_data, f, indent=2)
-                logger.info(f"Also saved to VAPT directory: {vapt_file}")
+                logger.info(f"Saved to VAPT directory: {vapt_file}")
+                output_file = vapt_file
             except Exception as e:
-                logger.warning(f"Could not save to VAPT directory: {e}")
+                logger.error(f"Could not save to VAPT directory: {e}")
+                return jsonify({"error": "Failed to save output"}), 500
+        else:
+            # Fallback to /var/log/qwen-0.5b if no VAPT directory exists
+            os.makedirs('/var/log/qwen-0.5b', exist_ok=True)
+            output_file = f"/var/log/qwen-0.5b/{tool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(output_file, 'w') as f:
+                json.dump(output_data, f, indent=2)
+            logger.info(f"Saved to fallback directory: {output_file}")
         
         logger.info(f"Processed {len(findings)} findings, saved to {output_file}")
         
@@ -284,7 +400,7 @@ def normalize_output():
             "success": True,
             "count": len(findings),
             "findings": findings,
-            "processing_method": "qwen_two_step_ai",
+            "processing_method": "qwen_one_step_ai",
             "message": f"Processed {len(findings)} findings"
         })
         
@@ -303,12 +419,12 @@ def status():
         "memory_usage": f"{memory.percent}%",
         "memory_available": f"{memory.available/1024/1024/1024:.1f}GB",
         "model_loaded": True,
-        "processing_method": "qwen_two_step_ai",
+        "processing_method": "qwen_one_step_ai",
         "timestamp": datetime.now().isoformat()
     })
 
 if __name__ == '__main__':
-    logger.info("Starting Qwen 0.5B Two-Step Normalization Service...")
+    logger.info("Starting Qwen 0.5B One-Step AI Service (Normalization + Remediation)...")
     
     # Create directories
     os.makedirs('/app/logs', exist_ok=True)

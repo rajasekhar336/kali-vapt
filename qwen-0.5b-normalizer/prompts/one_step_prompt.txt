@@ -1,0 +1,10 @@
+Convert security finding to normalized format:
+
+Tool: {{TOOL}}
+Target: {{TARGET}}
+Raw Output: {{RAW}}
+
+Output format:
+{"issue": "CSP Violation", "issue_type": "csp_violation", "severity": "medium", "url": "https://example.com", "description": "CSP allows unsafe scripts", "remediation": "Fix CSP policy"}
+
+Normalized JSON:

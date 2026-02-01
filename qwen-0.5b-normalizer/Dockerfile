@@ -26,6 +26,8 @@ RUN mkdir -p /app/models /app/prompts /app/output /app/logs
 COPY schema.json /app/
 COPY prompts/ /app/prompts/
 COPY orca-service.py /app/
+COPY remediation_rules.py /app/
+COPY vulnerability_classifier.py /app/
 
 # Create startup script that starts Ollama and our service
 RUN echo '#!/bin/bash\n\

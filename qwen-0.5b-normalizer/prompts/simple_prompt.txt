@@ -1,0 +1,28 @@
+You are a security expert. Convert this security tool output to JSON.
+
+TASK: Extract ONE security vulnerability and provide specific remediation.
+
+INPUT FORMAT:
+Tool: {tool}
+Target: {target}
+Raw: {raw_output}
+
+OUTPUT FORMAT (JSON only):
+{
+  "issue": "Cross Site Scripting (Reflected)",
+  "issue_type": "xss_reflected", 
+  "severity": "high",
+  "url": "https://example.com/login",
+  "description": "User input reflected without encoding",
+  "remediation": "1. Implement input validation on all user inputs. 2. Use output encoding with libraries like OWASP ESAPI. 3. Set Content-Security-Policy header. 4. Use parameterized queries for database operations. 5. Test with XSS payloads."
+}
+
+EXAMPLES:
+- CSP unsafe-inline → issue_type: "csp_violation" → remediation: "1. Remove 'unsafe-inline' from CSP. 2. Implement strict CSP: script-src 'self'. 3. Use nonce-based CSP. 4. Test with CSP Evaluator."
+- Missing headers → issue_type: "security_headers_missing" → remediation: "1. Add X-Frame-Options: DENY. 2. Add X-Content-Type-Options: nosniff. 3. Add Strict-Transport-Security. 4. Add Referrer-Policy."
+
+Tool: {{TOOL}}
+Target: {{TARGET}}
+Raw: {{RAW}}
+
+JSON:

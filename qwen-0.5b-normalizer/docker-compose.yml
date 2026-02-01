@@ -12,7 +12,6 @@ services:
     mem_limit: "3g"
     memswap_limit: "3g"
     volumes:
-      - ./output:/app/output
       - /var/log/qwen-0.5b:/app/logs
       - ollama_data:/root/.ollama
       - /var/log/output:/var/log/output  # Mount VAPT output directory

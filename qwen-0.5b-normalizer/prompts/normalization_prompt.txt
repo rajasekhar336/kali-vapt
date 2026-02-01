@@ -9,6 +9,7 @@ RULES:
 - Do not generate remediation
 - Let the AI determine the actual vulnerability type from the evidence
 - Do not change severity levels from the source
+- Extract specific technical details for remediation
 
 OUTPUT SCHEMA:
 {
@@ -20,15 +21,20 @@ OUTPUT SCHEMA:
   "severity": "high",
   "description": "User input is reflected without encoding",
   "confidence": "medium",
-  "evidence": "Raw evidence from tool output"
+  "evidence": "Raw evidence from tool output",
+  "technical_details": "Specific technical information for remediation"
 }
 
 ANALYSIS INSTRUCTIONS:
 - Read the raw tool output carefully
 - Identify what the actual security issue is
 - Extract the specific vulnerability type based on the evidence
-- Use standard security terminology (sql_injection, xss_reflected, etc.)
+- Use standard security terminology (sql_injection, xss_reflected, csp_violation, etc.)
 - Include the exact evidence that supports your analysis
+- Extract technical details that will help generate specific remediation
+- For CSP issues: extract the specific CSP directive that's problematic
+- For headers: identify which headers are missing
+- For injections: note the parameter or endpoint affected
 
 Tool: {{TOOL}}
 Target: {{TARGET}}

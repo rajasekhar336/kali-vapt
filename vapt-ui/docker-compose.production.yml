@@ -1,0 +1,195 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  vapt-db:
+    image: postgres:15-alpine
+    container_name: vapt-db-prod
+    environment:
+      POSTGRES_DB: vapt_platform
+      POSTGRES_USER: vapt_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-vapt_secure_password_change_me}
+    volumes:
+      - vapt_db_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - vapt-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vapt_user -d vapt_platform"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  vapt-redis:
+    image: redis:7-alpine
+    container_name: vapt-redis-prod
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_secure_password_change_me}
+    volumes:
+      - vapt_redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - vapt-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # FastAPI Backend
+  vapt-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vapt-backend-prod
+    environment:
+      DATABASE_URL: postgresql://vapt_user:${DB_PASSWORD:-vapt_secure_password_change_me}@vapt-db:5432/vapt_platform
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secure_password_change_me}@vapt-redis:6379/1
+      AI_SERVICE_URL: http://qwen-0.5b-normalizer-prod:8080
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-me-in-production}
+      ENVIRONMENT: production
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/log/output:/var/log/output
+    ports:
+      - "8000:8000"
+    depends_on:
+      vapt-db:
+        condition: service_healthy
+      vapt-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vapt-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Next.js Frontend
+  vapt-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: vapt-frontend-prod
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    depends_on:
+      - vapt-backend
+    restart: unless-stopped
+    networks:
+      - vapt-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Celery Worker
+  vapt-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: vapt-worker-prod
+    command: celery -A main.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      DATABASE_URL: postgresql://vapt_user:${DB_PASSWORD:-vapt_secure_password_change_me}@vapt-db:5432/vapt_platform
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secure_password_change_me}@vapt-redis:6379/1
+      AI_SERVICE_URL: http://qwen-0.5b-normalizer-prod:8080
+      SECRET_KEY: ${SECRET_KEY:-your-secret-key-change-me-in-production}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/log/output:/var/log/output
+    depends_on:
+      vapt-db:
+        condition: service_healthy
+      vapt-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vapt-network
+
+  # Nginx Reverse Proxy (Production)
+  vapt-nginx:
+    image: nginx:alpine
+    container_name: vapt-nginx-prod
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - vapt-frontend
+      - vapt-backend
+    restart: unless-stopped
+    networks:
+      - vapt-network
+
+  # Monitoring - Prometheus
+  vapt-prometheus:
+    image: prom/prometheus:latest
+    container_name: vapt-prometheus-prod
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - vapt-network
+
+  # Monitoring - Grafana
+  vapt-grafana:
+    image: grafana/grafana:latest
+    container_name: vapt-grafana-prod
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin_change_me}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    depends_on:
+      - vapt-prometheus
+    restart: unless-stopped
+    networks:
+      - vapt-network
+
+  # Existing AI Service (connect to existing)
+  qwen-0.5b-normalizer-prod:
+    image: qwen-0.5b-normalizer:latest
+    container_name: qwen-0.5b-normalizer-prod
+    ports:
+      - "8080:8080"
+      - "11434:11434"
+    networks:
+      - vapt-network
+    restart: unless-stopped
+
+volumes:
+  vapt_db_data:
+    driver: local
+  vapt_redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  vapt-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

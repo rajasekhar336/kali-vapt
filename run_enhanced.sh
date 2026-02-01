@@ -124,7 +124,7 @@ process_tool_output() {
     local tool_name="$1"
     local output_file="$2"
     
-    if [[ "$ENABLE_ORCA_INTEGRATION" != "true" ]]; then
+    if [[ "$ENABLE_QWEN_INTEGRATION" != "true" ]]; then
         return 0
     fi
     
@@ -153,7 +153,7 @@ process_tool_output() {
 
 # Background processor for parallel tool output processing
 start_background_processor() {
-    if [[ "$ENABLE_ORCA_INTEGRATION" != "true" ]]; then
+    if [[ "$ENABLE_QWEN_INTEGRATION" != "true" ]]; then
         return 0
     fi
     
@@ -190,7 +190,7 @@ queue_tool_processing() {
     local tool_name="$1"
     local output_file="$2"
     
-    if [[ "$ENABLE_ORCA_INTEGRATION" == "true" ]] && [[ -f "$output_file" ]]; then
+    if [[ "$ENABLE_QWEN_INTEGRATION" == "true" ]] && [[ -f "$output_file" ]]; then
         echo "$output_file" > "${OUTPUT_DIR}/processing_queue/${tool_name}.tool"
     fi
 }
@@ -441,6 +441,9 @@ run_vulnerability() {
     
     # Combine results
     run_docker "cat vuln/nuclei_*.txt 2>/dev/null | grep -v 'No vulnerabilities found' | sort -u > vuln/nuclei.txt || echo 'No vulnerabilities found' > vuln/nuclei.txt"
+    
+    # Convert Nmap XML to JSON
+    run_docker "if [[ -f vuln/nmap_vulners.xml ]]; then xq '.' vuln/nmap_vulners.xml > vuln/nmap_vulners.json 2>/dev/null || echo '{\"vulners\": []}' > vuln/nmap_vulners.json; else echo '{\"vulners\": []}' > vuln/nmap_vulners.json; fi"
     
     # Queue for Orca processing
     queue_tool_processing "nuclei" "${OUTPUT_DIR}/vuln/nuclei.txt"
@@ -794,7 +797,7 @@ main() {
     init_directories
     
     # Check service status (no automatic startup)
-    init_orca_service
+    init_qwen_service
     init_detectdojo_service
     
     # Start background processor for parallel tool processing (if Orca is running)
