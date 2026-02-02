@@ -1,0 +1,137 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Security Dashboard Design System - Dark Enterprise Theme */
+
+@layer base {
+  :root {
+    --background: 222 47% 6%;
+    --foreground: 210 40% 96%;
+
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 96%;
+
+    --popover: 222 47% 10%;
+    --popover-foreground: 210 40% 96%;
+
+    --primary: 217 91% 60%;
+    --primary-foreground: 222 47% 6%;
+
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 96%;
+
+    --muted: 217 33% 14%;
+    --muted-foreground: 215 20% 55%;
+
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 40% 96%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 18%;
+    --input: 217 33% 18%;
+    --ring: 217 91% 60%;
+
+    --radius: 0.5rem;
+
+    /* Severity Colors */
+    --severity-critical: 0 84% 60%;
+    --severity-high: 25 95% 53%;
+    --severity-medium: 45 93% 47%;
+    --severity-low: 217 91% 60%;
+
+    /* Status Colors */
+    --status-validated: 142 76% 36%;
+    --status-validated-bg: 142 76% 15%;
+    --status-false-positive: 0 72% 51%;
+    --status-false-positive-bg: 0 72% 15%;
+    --status-needs-review: 45 93% 47%;
+    --status-needs-review-bg: 45 93% 15%;
+    --status-pending: 217 33% 50%;
+    --status-pending-bg: 217 33% 14%;
+
+    /* Surface variants */
+    --surface-elevated: 222 47% 10%;
+    --surface-overlay: 222 47% 12%;
+
+    --sidebar-background: 222 47% 5%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 222 47% 6%;
+    --sidebar-accent: 217 33% 17%;
+    --sidebar-accent-foreground: 210 40% 96%;
+    --sidebar-border: 217 33% 18%;
+    --sidebar-ring: 217 91% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+@layer components {
+  .severity-badge {
+    @apply px-2 py-0.5 rounded text-xs font-semibold uppercase tracking-wide;
+  }
+
+  .severity-critical {
+    @apply bg-[hsl(var(--severity-critical)/0.2)] text-[hsl(var(--severity-critical))];
+  }
+
+  .severity-high {
+    @apply bg-[hsl(var(--severity-high)/0.2)] text-[hsl(var(--severity-high))];
+  }
+
+  .severity-medium {
+    @apply bg-[hsl(var(--severity-medium)/0.2)] text-[hsl(var(--severity-medium))];
+  }
+
+  .severity-low {
+    @apply bg-[hsl(var(--severity-low)/0.2)] text-[hsl(var(--severity-low))];
+  }
+
+  .status-row-validated {
+    @apply bg-[hsl(var(--status-validated-bg))] border-l-4 border-l-[hsl(var(--status-validated))];
+  }
+
+  .status-row-false-positive {
+    @apply bg-[hsl(var(--status-false-positive-bg))] border-l-4 border-l-[hsl(var(--status-false-positive))];
+  }
+
+  .status-row-needs-review {
+    @apply bg-[hsl(var(--status-needs-review-bg))] border-l-4 border-l-[hsl(var(--status-needs-review))];
+  }
+
+  .status-row-pending {
+    @apply bg-transparent border-l-4 border-l-transparent;
+  }
+
+  .glass-panel {
+    @apply bg-card/80 backdrop-blur-md border border-border;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
