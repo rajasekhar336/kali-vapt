@@ -5,11 +5,11 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
-import { 
-  Shield, 
-  AlertTriangle, 
-  CheckCircle, 
-  Clock, 
+import {
+  Shield,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
   Download,
   Eye,
   Loader2,
@@ -26,7 +26,7 @@ const VAPTDashboard = () => {
   const [remediationLoading, setRemediationLoading] = useState(false);
 
   // API base URL
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+  const API_URL = '';
 
   // Load scans on component mount
   useEffect(() => {
@@ -79,7 +79,7 @@ const VAPTDashboard = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_domain: targetDomain })
       });
-      
+
       if (response.ok) {
         loadScans();
         alert('Scan started successfully!');
@@ -97,7 +97,7 @@ const VAPTDashboard = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ format })
       });
-      
+
       if (response.ok) {
         alert('Report generation started!');
       }
@@ -166,9 +166,8 @@ const VAPTDashboard = () => {
                     {scans.map((scan) => (
                       <div
                         key={scan.id}
-                        className={`p-3 rounded-lg border cursor-pointer transition-colors ${
-                          selectedScan?.id === scan.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
-                        }`}
+                        className={`p-3 rounded-lg border cursor-pointer transition-colors ${selectedScan?.id === scan.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'
+                          }`}
                         onClick={() => {
                           setSelectedScan(scan);
                           loadVulnerabilities(scan.id);
@@ -208,16 +207,16 @@ const VAPTDashboard = () => {
                   <div className="flex justify-between items-center">
                     <h3 className="text-lg font-semibold">Vulnerabilities Found</h3>
                     <div className="flex gap-2">
-                      <Button 
-                        size="sm" 
+                      <Button
+                        size="sm"
                         variant="outline"
                         onClick={() => generateReport(selectedScan.id, 'pdf')}
                       >
                         <Download className="h-4 w-4 mr-2" />
                         PDF
                       </Button>
-                      <Button 
-                        size="sm" 
+                      <Button
+                        size="sm"
                         variant="outline"
                         onClick={() => generateReport(selectedScan.id, 'docx')}
                       >
@@ -240,7 +239,7 @@ const VAPTDashboard = () => {
                                 <span className="font-medium">{vuln.title}</span>
                               </div>
                               <div className="text-sm text-gray-600 mb-2">
-                                <strong>Tool:</strong> {vuln.tool_name} | 
+                                <strong>Tool:</strong> {vuln.tool_name} |
                                 <strong> Endpoint:</strong> {vuln.endpoint || 'N/A'}
                               </div>
                               <p className="text-sm text-gray-700 line-clamp-2">
@@ -288,14 +287,14 @@ const VAPTDashboard = () => {
                     <CardContent className="p-6">
                       <h3 className="text-lg font-semibold mb-4">Generate Reports</h3>
                       <div className="grid grid-cols-2 gap-4">
-                        <Button 
+                        <Button
                           onClick={() => generateReport(selectedScan.id, 'pdf')}
                           className="flex items-center gap-2"
                         >
                           <Download className="h-4 w-4" />
                           Generate PDF Report
                         </Button>
-                        <Button 
+                        <Button
                           onClick={() => generateReport(selectedScan.id, 'docx')}
                           variant="outline"
                           className="flex items-center gap-2"
@@ -352,7 +351,7 @@ const VAPTDashboard = () => {
                             <p><strong>Endpoint:</strong> {selectedVuln.endpoint}</p>
                           </div>
                         </div>
-                        
+
                         {remediation.findings && remediation.findings[0] && (
                           <div>
                             <h4 className="font-semibold mb-2">AI Remediation Steps</h4>
@@ -363,7 +362,7 @@ const VAPTDashboard = () => {
                             </div>
                           </div>
                         )}
-                        
+
                         <div className="flex justify-end gap-2">
                           <Button variant="outline" onClick={() => setSelectedVuln(null)}>
                             Close

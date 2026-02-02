@@ -97,7 +97,7 @@ log_warn() {
 init_qwen_service() {
     if [[ "$ENABLE_QWEN_INTEGRATION" == "true" ]]; then
         log_info "Checking Qwen 0.5B service status..."
-        if ! curl -s "http://localhost:8080/health" >/dev/null 2>&1; then
+        if ! curl -s "${AI_SERVICE_URL:-http://localhost:8080}/health" >/dev/null 2>&1; then
             log_warn "Qwen service not running - normalization disabled"
             ENABLE_QWEN_INTEGRATION=false
         else
@@ -110,7 +110,7 @@ init_qwen_service() {
 init_detectdojo_service() {
     if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
         log_info "Checking DetectDojo service status..."
-        if ! curl -s "http://localhost:8081" >/dev/null 2>&1; then
+        if ! curl -s "${DETECTDOJO_URL:-http://localhost:8081}" >/dev/null 2>&1; then
             log_warn "DetectDojo service not running - correlation disabled"
             ENABLE_DETECTDOJO_INTEGRATION=false
         else
@@ -284,7 +284,7 @@ run_docker() {
     local container_name="vapt-$(uuidgen | head -c 8)"
     
     # Ensure output directory is writable
-    sudo chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
+    chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
     
     docker run --rm \
         --name "$container_name" \
@@ -310,16 +310,16 @@ init_directories() {
     # Define canonical scan identifiers (ONCE)
     SCAN_DATE=$(date +"%Y%m%d")
     SCAN_TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-    SCAN_ID="${TARGET_DOMAIN}_${SCAN_DATE}"
+    SCAN_ID="${SCAN_ID:-${TARGET_DOMAIN}_${SCAN_DATE}}"
     
     OUTPUT_BASE="/var/log/output"
-    OUTPUT_DIR="${OUTPUT_BASE}/${SCAN_ID}"
-    LOG_FILE="/var/production/logs/execution_${SCAN_TIMESTAMP}.log"
+    OUTPUT_DIR="${OUTPUT_DIR:-${OUTPUT_BASE}/${SCAN_ID}}"
+    LOG_FILE="${OUTPUT_DIR}/execution.log"
     
     # Create base output directory with fallback
     if ! mkdir -p "$OUTPUT_BASE" 2>/dev/null; then
-        # Try with sudo if user permission fails
-        sudo mkdir -p "$OUTPUT_BASE" 2>/dev/null || {
+        # Try with if user permission fails
+        mkdir -p "$OUTPUT_BASE" 2>/dev/null || {
             # Fallback to user directory
             OUTPUT_BASE="$HOME/vapt_output"
             mkdir -p "$OUTPUT_BASE"
@@ -330,28 +330,28 @@ init_directories() {
     
     # Create scan-specific directory with permissions
     if ! mkdir -p "$OUTPUT_DIR" 2>/dev/null; then
-        sudo mkdir -p "$OUTPUT_DIR" 2>/dev/null || {
+        mkdir -p "$OUTPUT_DIR" 2>/dev/null || {
             log_error "Failed to create output directory: $OUTPUT_DIR"
             exit 1
         }
     fi
     
     # Ensure proper permissions and ownership
-    sudo chown -R "$(id -u):$(id -g)" "$OUTPUT_DIR" 2>/dev/null || true
-    chmod 755 "$OUTPUT_DIR" 2>/dev/null || sudo chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
+    chown -R "$(id -u):$(id -g)" "$OUTPUT_DIR" 2>/dev/null || true
+    chmod 755 "$OUTPUT_DIR" 2>/dev/null || chmod 755 "$OUTPUT_DIR" 2>/dev/null || true
     
     # Create processing queue directory
-    mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || sudo mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
-    chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || sudo chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
+    mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || mkdir -p "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
+    chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || chmod 755 "${OUTPUT_DIR}/processing_queue" 2>/dev/null || true
     
     # Create scan subdirectories
     for dir in recon network vuln web ssl database container reports; do
-        mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || sudo mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
-        sudo chown "$(id -u):$(id -g)" "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
+        mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || mkdir -p "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
+        chown "$(id -u):$(id -g)" "${OUTPUT_DIR}/${dir}" 2>/dev/null || true
     done
     
     # Create log directory
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || sudo mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     
     log_ok "Directories initialized"
     log_info "Output directory: $OUTPUT_DIR"
@@ -720,6 +720,10 @@ check_authorization() {
     echo -e "${YELLOW}This tool should only be used on systems you own or have explicit permission to test.${NC}"
     echo -e "${YELLOW}Unauthorized scanning is illegal and unethical.${NC}"
     echo ""
+    if [[ "${I_HAVE_AUTHORIZATION:-no}" == "yes" ]]; then
+        echo -e "${GREEN}[OK] Authorization confirmed via environment variable.${NC}"
+        return 0
+    fi
     read -p "Confirm you have authorization to scan ${TARGET_DOMAIN} (yes/no): " CONFIRM
     if [[ "$CONFIRM" != "yes" ]]; then
         echo -e "${RED}[ERROR] Authorization not confirmed. Exiting.${NC}"

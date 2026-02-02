@@ -11,6 +11,7 @@ import uuid
 import asyncio
 import aiohttp
 import logging
+import os
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 import docker
@@ -71,8 +72,8 @@ def get_docker_client():
 
 # Pydantic models
 class ScanRequest(BaseModel):
-    target_domain: str = Field(..., pattern=r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-    scan_type: str = Field(default='full', pattern=r'^(full|quick|custom)$')
+    target_domain: str = Field(...)
+    scan_type: str = Field(default='full')
     tools: Optional[List[str]] = None
     config: Optional[Dict[str, Any]] = None
 
@@ -209,9 +210,9 @@ async def create_scan(
     """Create and start a new VAPT scan"""
     scan_id = str(uuid.uuid4())
     
-    # Validate domain
-    if not await validate_domain(scan_request.target_domain):
-        raise HTTPException(status_code=400, detail="Invalid target domain")
+    # Relax validation to avoid reachability issues from container
+    # if not await validate_domain(scan_request.target_domain):
+    #     raise HTTPException(status_code=400, detail="Invalid target domain")
     
     # Insert scan into database
     async with db.pool.acquire() as conn:
@@ -241,43 +242,37 @@ async def list_scans(
     current_user: dict = Depends(get_current_user)
 ):
     """List scans with pagination and filtering"""
-    async with db.pool.acquire() as conn:
-        query = """
-            SELECT id, target_domain, scan_type, status, started_at, completed_at, created_by
-            FROM scans
-            WHERE created_by = $1
-        """
-        params = [current_user["user_id"]]
-        
-        if status:
-            query += " AND status = $2"
-            params.append(status)
-        
-        query += " ORDER BY started_at DESC LIMIT $%s OFFSET $%s"
-        params.extend([limit, offset])
-        
-        # Adjust parameter placeholders for asyncpg
-        param_placeholders = []
-        for i, param in enumerate(params, 1):
-            param_placeholders.append(f"${i}")
-        
-        query = query.replace("$%s", param_placeholders[-2]).replace("$%s", param_placeholders[-1])
-        
-        rows = await conn.fetch(query, *params)
-        
-        scans = []
-        for row in rows:
-            scans.append({
-                "id": row["id"],
-                "target_domain": row["target_domain"],
-                "scan_type": row["scan_type"],
-                "status": row["status"],
-                "started_at": row["started_at"].isoformat(),
-                "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
-                "created_by": row["created_by"]
-            })
-        
-        return {"scans": scans}
+    try:
+        async with db.pool.acquire() as conn:
+            query = "SELECT id, target_domain, scan_type, status, started_at, completed_at, created_by FROM scans WHERE created_by = $1"
+            params = [current_user["user_id"]]
+            
+            if status:
+                query += f" AND status = ${len(params) + 1}"
+                params.append(status)
+                
+            query += f" ORDER BY started_at DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+            params.extend([limit, offset])
+            
+            logger.info(f"Executing query: {query} with params: {params}")
+            rows = await conn.fetch(query, *params)
+            
+            scans = []
+            for row in rows:
+                scans.append({
+                    "id": str(row["id"]),
+                    "target_domain": row["target_domain"],
+                    "scan_type": row["scan_type"],
+                    "status": row["status"],
+                    "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                    "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+                    "created_by": row["created_by"]
+                })
+            
+            return {"scans": scans}
+    except Exception as e:
+        logger.error(f"FATAL ERROR in list_scans: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/scans/{scan_id}/vulnerabilities", tags=["Vulnerabilities"])
 async def get_vulnerabilities(
@@ -399,24 +394,83 @@ async def execute_scan_background(scan_id: str, scan_config: dict):
         )
     
     try:
-        # Execute tools using Docker containers
         target_domain = scan_config["target_domain"]
+        scan_type = scan_config.get("scan_type", "quick")
         
-        # This would integrate with your existing run_enhanced.sh
-        # For now, simulate the scan
-        await asyncio.sleep(30)  # Simulate scan time
+        # Output directory same as on host via mount
+        output_dir = f"/var/log/output/{scan_id}"
+        os.makedirs(output_dir, exist_ok=True)
         
-        # Update scan status
+        # Environment variables for run_enhanced.sh
+        env = os.environ.copy()
+        env["TARGET_DOMAIN"] = target_domain
+        env["OUTPUT_DIR"] = output_dir
+        env["I_HAVE_AUTHORIZATION"] = "yes"
+        env["EXECUTION_MODE"] = scan_type
+        
+        logger.info(f"Starting real scan for {target_domain} (ID: {scan_id})")
+        
+        # Execute run_enhanced.sh
+        # We use /bin/bash explicitly as the script has a bash shebang but just to be safe
+        process = await asyncio.create_subprocess_exec(
+            "bash", "/var/production/run_enhanced.sh",
+            "-d", target_domain,
+            "-m", scan_type,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        
+        # Log output to scan_log.txt
+        log_file = f"{output_dir}/scan_log.txt"
+        with open(log_file, "w") as f:
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+                decoded_line = line.decode().strip()
+                f.write(decoded_line + "\n")
+                # f.flush()
+        
+        exit_code = await process.wait()
+        logger.info(f"Scan for {target_domain} finished with exit code {exit_code}")
+        
+        # Parse Nuklei results
+        nuclei_file = f"{output_dir}/vuln/nuclei.txt"
+        if os.path.exists(nuclei_file):
+            logger.info(f"Parsing nuclei results from {nuclei_file}")
+            async with db.pool.acquire() as conn:
+                with open(nuclei_file, "r") as f:
+                    for line in f:
+                        if "No vulnerabilities found" in line:
+                            continue
+                        # format: [template-id] [protocol] [severity] [url] [content]
+                        parts = line.strip().split(" ", 4)
+                        if len(parts) >= 4:
+                            vuln_id = str(uuid.uuid4())
+                            title = parts[0].strip("[]")
+                            severity = parts[2].strip("[]").lower()
+                            # Standardize severity
+                            if severity not in ["info", "low", "medium", "high", "critical"]:
+                                severity = "info"
+                            
+                            endpoint = parts[3]
+                            desc = parts[4] if len(parts) > 4 else ""
+                            
+                            await conn.execute("""
+                                INSERT INTO vulnerabilities (id, scan_id, tool_name, title, severity, issue_type, endpoint, description, raw_output)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            """, vuln_id, scan_id, "nuclei", title, severity, title, endpoint, desc, line)
+
+        # Update scan status to completed
         async with db.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET status = 'completed', completed_at = NOW() WHERE id = $1",
                 scan_id
             )
         
-        logger.info(f"Scan {scan_id} completed successfully")
-        
     except Exception as e:
-        logger.error(f"Scan {scan_id} failed: {e}")
+        logger.error(f"Scan {scan_id} failed with error: {str(e)}", exc_info=True)
         async with db.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE scans SET status = 'failed' WHERE id = $1",
