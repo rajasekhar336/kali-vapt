@@ -651,7 +651,7 @@ feed_database_inputs_to_pipeline() {
     # Check db_ports output (any database ports found)
     if [[ -f "${OUTPUT_DIR}/database/db_ports.nmap" ]]; then
         local db_port_count
-        db_port_count=$(run_docker "xq '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid' database/db_ports.nmap 2>/dev/null | wc -l || echo '0'" 2>/dev/null || echo "0")
+        db_port_count=$(run_docker "xq '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\") | .portid' database/db_ports.nmap 2>/dev/null | wc -l || echo '0'" 2>/dev/null || echo "0")
         if [[ "$db_port_count" -gt 0 ]]; then
             log_info "Feeding $db_port_count database ports from db_ports to nmap for detailed scanning..."
             
