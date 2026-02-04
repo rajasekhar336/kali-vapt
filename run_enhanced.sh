@@ -651,12 +651,10 @@ feed_database_inputs_to_pipeline() {
     # Check db_ports output (any database ports found)
     if [[ -f "${OUTPUT_DIR}/database/db_ports.nmap" ]]; then
         local db_port_count
-        db_port_count=$(run_docker "xq '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\") | .portid' database/db_ports.nmap 2>/dev/null | wc -l || echo '0'" 2>/dev/null || echo "0")
         if [[ "$db_port_count" -gt 0 ]]; then
             log_info "Feeding $db_port_count database ports from db_ports to nmap for detailed scanning..."
             
             # Extract database ports and feed to nmap for detailed scanning
-            run_docker "xq -r '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid' database/db_ports.nmap 2>/dev/null | tr '\n' ',' | sed 's/,$//' > database/db_port_list.txt 2>/dev/null || true" 2>/dev/null || true
             
             if [[ -f "${OUTPUT_DIR}/database/db_port_list.txt" ]] && [[ -s "${OUTPUT_DIR}/database/db_port_list.txt" ]]; then
                 run_docker "nmap -sV -sC -p \$(cat database/db_port_list.txt) ${TARGET_DOMAIN} -oA database/db_detailed_scan || true" 2>/dev/null || true
@@ -782,18 +780,14 @@ create_summary_files() {
             # Create nikto summary from multiple nikto XML files
             if ls "${OUTPUT_DIR}/web"/nikto_*.xml 1>/dev/null 2>&1; then
                 # Combine XML files using xq
-                run_docker "xq -s 'map(select(.niktoscan)) | add' web/nikto_*.xml 2>/dev/null > web/nikto_summary.xml || echo '<niktoscan></niktoscan>' > web/nikto_summary.xml" 2>/dev/null || true
             else
-                echo '<niktoscan></niktoscan>' > "${OUTPUT_DIR}/web/nikto_summary.xml"
             fi
             ;;
         "database")
             # Create sqlmap summary from multiple sqlmap log.xml files
             if ls "${OUTPUT_DIR}"/database/sqlmap_*/log.xml 1>/dev/null 2>&1; then
                 # Combine XML files using xq
-                run_docker "xq -s 'map(select(.sqlmap)) | add' database/sqlmap_*/log.xml 2>/dev/null > database/sqlmap_summary.xml || echo '<sqlmap></sqlmap>' > database/sqlmap_summary.xml" 2>/dev/null || true
             else
-                echo '<sqlmap></sqlmap>' > "${OUTPUT_DIR}/database/sqlmap_summary.xml"
             fi
             ;;
     esac
