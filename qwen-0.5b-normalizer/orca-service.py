@@ -16,6 +16,11 @@ import psutil
 import requests
 from flask import Flask, request, jsonify
 from datetime import datetime
+import re
+
+# Local imports (rule-based helpers)
+from vulnerability_classifier import classify_vulnerability
+from remediation_rules import get_detailed_remediation
 
 # Configure logging
 logging.basicConfig(
@@ -68,17 +73,90 @@ def load_model():
             logger.info(f"Waiting for Ollama... ({i+1}/{max_retries})")
             time.sleep(2)
     
-    logger.error("Failed to connect to Ollama service")
-    sys.exit(1)
+    logger.error("Failed to connect to Ollama service; falling back to mock mode")
+    # Do not exit the process; continue in degraded/mock mode so the service remains available.
+    use_mock_ai = True
+    model = None
+    tokenizer = None
+    return
 
 def load_schema():
     """Load JSON schema"""
     try:
         with open('/app/schema.json', 'r') as f:
-            return json.load(f)
+            raw = json.load(f)
+            # Convert permissive schema file into a jsonschema-compatible schema
+            # If the file contains a simple template, create a basic validation schema
+            if isinstance(raw, dict) and any('|' in str(v) for v in raw.values()):
+                properties = {}
+                for k, v in raw.items():
+                    properties[k] = {"type": "string"}
+                return {"type": "object", "properties": properties}
+            return raw
     except Exception as e:
         logger.error(f"Schema loading error: {e}")
         return {}
+
+
+def validate_against_schema(data):
+    """Validate parsed AI output against schema.json using jsonschema."""
+    try:
+        from jsonschema import validate, ValidationError
+    except Exception:
+        logger.debug("jsonschema not available; skipping validation")
+        return True
+
+    schema = load_schema()
+    if not schema:
+        return True
+
+    try:
+        validate(instance=data, schema=schema)
+        return True
+    except ValidationError as e:
+        logger.warning(f"AI output failed schema validation: {e}")
+        return False
+
+
+def _extract_json_from_ai_response(ai_response):
+    """Attempt to robustly extract a JSON object from an AI text response.
+
+    Tries fenced ```json blocks first, then finds the first balanced JSON object.
+    Returns parsed JSON (dict) or None on failure.
+    """
+    if not ai_response:
+        return None
+
+    # Try fenced ```json blocks
+    m = re.search(r"```json\s*(\{.*?\})\s*```", ai_response, re.S)
+    if m:
+        candidate = m.group(1)
+    else:
+        # Fallback: find first balanced JSON object by scanning braces
+        start = ai_response.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        end = None
+        for i in range(start, len(ai_response)):
+            if ai_response[i] == '{':
+                depth += 1
+            elif ai_response[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is None:
+            return None
+        candidate = ai_response[start:end]
+
+    # Clean candidate and attempt parse
+    candidate = candidate.strip().strip('`')
+    try:
+        return json.loads(candidate)
+    except Exception as e:
+        logger.debug(f"Failed to parse extracted JSON: {e}")
+        return None
 
 def normalize_finding(tool_name, tool_output, target_domain):
     """Step 1: Normalize raw tool output using rule-based classification"""
@@ -124,23 +202,21 @@ def generate_remediation(normalized_finding):
         
         ai_response = response.json().get("response", "")
         
-        # Extract JSON from response
-        try:
-            start_idx = ai_response.find('{')
-            end_idx = ai_response.rfind('}') + 1
-            if start_idx != -1 and end_idx != -1:
-                json_str = ai_response[start_idx:end_idx]
-                result = json.loads(json_str)
-                remediation = result.get("remediation", "Generic remediation: Apply security best practices.")
-                logger.info(f"Successfully generated remediation")
-                return remediation
-        except json.JSONDecodeError:
-            # Fallback: extract text if JSON parsing fails
-            lines = ai_response.split('\n')
-            for line in lines:
-                if 'remediation' in line.lower() and ':' in line:
-                    return line.split(':', 1)[1].strip().strip('"')
-        
+        ai_response = ai_response
+        result = _extract_json_from_ai_response(ai_response)
+        if result and validate_against_schema(result):
+            remediation = result.get("remediation", "Generic remediation: Apply security best practices.")
+            logger.info("Successfully generated remediation")
+            return remediation
+        elif result:
+            logger.warning("Parsed AI JSON but it failed schema validation; ignoring AI remediation")
+
+        # Fallback: try to extract a remediation line from plain text
+        lines = ai_response.splitlines()
+        for line in lines:
+            if 'remediation' in line.lower() and ':' in line:
+                return line.split(':', 1)[1].strip().strip('"')
+
         return "Remediation: Follow security best practices for this vulnerability type."
         
     except Exception as e:
@@ -174,45 +250,27 @@ def process_with_one_step_ai(tool_name, tool_output, target_domain):
             return findings
         
         ai_response = response.json().get("response", "")
-        
-        # Extract JSON from response
-        try:
-            # Find JSON in the response - look for { and }
-            start_idx = ai_response.find('{')
-            end_idx = ai_response.rfind('}') + 1
-            if start_idx != -1 and end_idx != -1:
-                json_str = ai_response[start_idx:end_idx]
-                # Clean up the JSON string
-                json_str = json_str.replace('```json', '').replace('```', '').strip()
-                # Try to parse JSON
-                result = json.loads(json_str)
-                
-                # Create final finding with AI-generated remediation
-                final_finding = {
-                    "title": result.get("issue", "Unknown Issue"),
-                    "severity": result.get("severity", "medium"),
-                    "cve": "",
-                    "tool": tool_name,
-                    "target": target_domain,
-                    "endpoint": result.get("url", ""),
-                    "description": result.get("description", ""),
-                    "remediation": result.get("remediation", "Follow security best practices."),
-                    "confidence": "medium",
-                    "cvss": "",
-                    "references": f"https://owasp.org/www-project-top-ten/{result.get('issue_type', result.get('issue__type', 'other'))}",
-                    "raw_output": tool_output
-                }
-                
-                findings.append(final_finding)
-                logger.info(f"Successfully processed with one-step AI: {result.get('issue_type', 'unknown')}")
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error in one-step AI: {e}")
-            logger.debug(f"AI response: {ai_response}")
-            logger.debug(f"Extracted JSON string: {json_str if 'json_str' in locals() else 'N/A'}")
-        except Exception as e:
-            logger.error(f"Processing error in one-step AI: {e}")
-            logger.debug(f"AI response: {ai_response}")
+        result = _extract_json_from_ai_response(ai_response)
+        if result and validate_against_schema(result):
+            final_finding = {
+                "title": result.get("issue", "Unknown Issue"),
+                "severity": result.get("severity", "medium"),
+                "cve": "",
+                "tool": tool_name,
+                "target": target_domain,
+                "endpoint": result.get("url", ""),
+                "description": result.get("description", ""),
+                "remediation": result.get("remediation", "Follow security best practices."),
+                "confidence": "medium",
+                "cvss": "",
+                "references": f"https://owasp.org/www-project-top-ten/{result.get('issue_type', result.get('issue__type', 'other'))}",
+                "raw_output": tool_output
+            }
+
+            findings.append(final_finding)
+            logger.info(f"Successfully processed with one-step AI: {result.get('issue_type', 'unknown')}")
+        elif result:
+            logger.warning("AI returned JSON but it failed schema validation; skipping")
         
     except Exception as e:
         logger.error(f"One-step AI processing error: {e}")
@@ -246,81 +304,30 @@ def process_with_simple_ai(tool_name, tool_output, target_domain):
             return findings
         
         ai_response = response.json().get("response", "")
-        
-        # Extract JSON from response
-        try:
-            start_idx = ai_response.find('{')
-            end_idx = ai_response.rfind('}') + 1
-            if start_idx != -1 and end_idx != -1:
-                json_str = ai_response[start_idx:end_idx]
-                result = json.loads(json_str)
-                
-                # Create final finding
-                final_finding = {
-                    "title": result.get("issue", "Unknown Issue"),
-                    "severity": result.get("severity", "medium"),
-                    "cve": "",
-                    "tool": tool_name,
-                    "target": target_domain,
-                    "endpoint": result.get("url", ""),
-                    "description": result.get("description", ""),
-                    "remediation": result.get("remediation", "Follow security best practices."),
-                    "confidence": "medium",
-                    "cvss": "",
-                    "references": "",
-                    "raw_output": tool_output
-                }
-                
-                findings.append(final_finding)
-                logger.info(f"Successfully processed with simple AI: {result.get('issue_type', 'unknown')}")
-                
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error in simple AI: {e}")
-            logger.debug(f"AI response: {ai_response}")
+        result = _extract_json_from_ai_response(ai_response)
+        if result and validate_against_schema(result):
+            final_finding = {
+                "title": result.get("issue", "Unknown Issue"),
+                "severity": result.get("severity", "medium"),
+                "cve": "",
+                "tool": tool_name,
+                "target": target_domain,
+                "endpoint": result.get("url", ""),
+                "description": result.get("description", ""),
+                "remediation": result.get("remediation", "Follow security best practices."),
+                "confidence": "medium",
+                "cvss": "",
+                "references": "",
+                "raw_output": tool_output
+            }
+
+            findings.append(final_finding)
+            logger.info(f"Successfully processed with simple AI: {result.get('issue_type', 'unknown')}")
+        elif result:
+            logger.warning("AI returned JSON but it failed schema validation; skipping")
         
     except Exception as e:
         logger.error(f"Simple AI processing error: {e}")
-    
-    return findings
-    """Process tool output using two-step LLM flow"""
-    findings = []
-    
-    try:
-        # Step 1: Normalize the finding
-        normalized = normalize_finding(tool_name, tool_output, target_domain)
-        if not normalized:
-            logger.warning(f"Failed to normalize {tool_name} output")
-            return findings
-        
-        # Step 2: Generate remediation using rules (not AI)
-        remediation = get_detailed_remediation(
-            normalized.get("issue_type", "security_headers_missing"),
-            normalized.get("issue", ""),
-            normalized.get("url", ""),
-            normalized.get("description", "")
-        )
-        
-        # Combine into final finding
-        final_finding = {
-            "title": normalized.get("issue", "Unknown Issue"),
-            "severity": normalized.get("severity", "medium"),
-            "cve": "",  # Can be added later
-            "tool": normalized.get("tool", tool_name),
-            "target": normalized.get("target", target_domain),
-            "endpoint": normalized.get("url", ""),
-            "description": normalized.get("description", ""),
-            "remediation": remediation,
-            "confidence": normalized.get("confidence", "medium"),
-            "cvss": "",  # Can be calculated later
-            "references": "",  # Can be added based on issue_type
-            "raw_output": tool_output
-        }
-        
-        findings.append(final_finding)
-        logger.info(f"Successfully processed {tool_name} finding with two-step flow")
-        
-    except Exception as e:
-        logger.error(f"Two-step processing error: {e}")
     
     return findings
 

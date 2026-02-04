@@ -14,7 +14,9 @@ services:
     volumes:
       - ./run_enhanced.sh:/opt/run_enhanced.sh
       - ./logs:/var/log/output
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Mounting the Docker socket gives the container root access to the host Docker
+      # engine and is a major privilege escalation risk. Enable only if strictly required.
+      # - /var/run/docker.sock:/var/run/docker.sock
     command: tail -f /dev/null
     networks:
       - vapt-network
@@ -29,7 +31,6 @@ services:
     container_name: qwen-0.5b-normalizer-prod
     ports:
       - "8080:8080"
-      - "11434:11434"
     cpus: "1.5"
     mem_limit: "3g"
     memswap_limit: "3g"
@@ -47,7 +48,7 @@ services:
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
-      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_URL=http://127.0.0.1:11434
       - MODEL_PATH=/app/models
       - MAX_MEMORY=1800
       - TOKEN_LIMIT=512
@@ -60,10 +61,32 @@ services:
       dockerfile: Dockerfile
     container_name: detectdojo-server
     ports:
-      - "8081:80"
+      - "8081:8081"
     restart: unless-stopped
+    environment:
+      - NORMALIZER_URL=http://qwen-0.5b-normalizer:8080
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /var/log/detectdojo:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - vapt-network
+
+# Example Ollama service (optional). Recommended to run Ollama separately from the normalizer:
+# ollama:
+#   image: ollama/ollama:latest
+#   container_name: ollama
+#   ports:
+#     - "11434:11434"
+#   volumes:
+#     - ollama_data:/root/.ollama
+#   restart: unless-stopped
+#   networks:
+#     - vapt-network
 
 networks:
   vapt-network:

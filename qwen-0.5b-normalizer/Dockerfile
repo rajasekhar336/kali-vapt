@@ -9,14 +9,20 @@ RUN apt-get update && apt-get install -y \
     zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama
-RUN curl -fsSL https://ollama.com/install.sh | sh
+# Install Ollama (download then run to avoid piping remote scripts directly)
+RUN curl -fsSL -o /tmp/ollama_install.sh https://ollama.com/install.sh && \
+    # TODO: verify checksum/signature of the installer before running in production
+    sh /tmp/ollama_install.sh && \
+    rm -f /tmp/ollama_install.sh
 
 # Install Python dependencies
 RUN pip install --no-cache-dir \
     flask \
     requests \
     psutil
+# Install python dependencies from requirements.txt if present
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt || true
 
 # Create app directories
 WORKDIR /app
@@ -31,18 +37,8 @@ COPY vulnerability_classifier.py /app/
 
 # Create startup script that starts Ollama and our service
 RUN echo '#!/bin/bash\n\
-echo "Starting Ollama service..."\n\
-ollama serve &\n\
-sleep 5\n\
-echo "Checking for Qwen 0.5B model..."\n\
-if ollama list | grep -q "qwen:0.5b"; then\n\
-    echo "✓ Qwen 0.5B model already available"\n\
-else\n\
-    echo "📥 Downloading Qwen 0.5B model (500MB - one-time download)..."\n\
-    ollama pull qwen:0.5b\n\
-    echo "✓ Model download completed"\n\
-fi\n\
-echo "Starting Qwen 0.5B AI Service..."\n\
+echo "Starting Qwen 0.5B AI Normalizer Service (Flask)..."\n\
+echo "Note: Ollama should be run as a separate service; this container will not start Ollama."\n\
 echo "Memory info:"\n\
 free -h\n\
 echo "Starting Flask API..."\n\

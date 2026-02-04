@@ -110,12 +110,56 @@ init_qwen_service() {
 init_detectdojo_service() {
     if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
         log_info "Checking DetectDojo service status..."
-        if ! curl -s "${DETECTDOJO_URL:-http://localhost:8081}" >/dev/null 2>&1; then
+        if ! curl -s "${DETECTDOJO_URL:-http://localhost:8081}/health" >/dev/null 2>&1; then
             log_warn "DetectDojo service not running - correlation disabled"
             ENABLE_DETECTDOJO_INTEGRATION=false
         else
             log_info "DetectDojo service is running and ready"
         fi
+    fi
+}
+
+# Send tool output to DetectDojo via REST API
+send_to_detectdojo() {
+    local tool_name="$1"
+    local target_domain="$2"
+    local output_file="$3"
+    
+    if [[ ! -f "$output_file" ]]; then
+        log_warn "Output file not found for $tool_name: $output_file"
+        return 1
+    fi
+    
+    local tool_output
+    tool_output=$(cat "$output_file")
+    
+    # Send to DetectDojo API
+    local response
+    response=$(curl -s -X POST "${DETECTDOJO_URL:-http://localhost:8081}/api/findings/add" \
+        -H "Content-Type: application/json" \
+        -d @- << EOF
+{
+  "tool_name": "$tool_name",
+  "target_domain": "$target_domain",
+  "tool_output": $(jq -Rs . <<< "$tool_output")
+}
+EOF
+    )
+    
+    if [[ -z "$response" ]]; then
+        log_warn "DetectDojo API call failed for $tool_name"
+        return 1
+    fi
+    
+    # Check for success in response
+    if echo "$response" | grep -q '"success": true\|"normalized_count"'; then
+        local count
+        count=$(echo "$response" | jq '.total_findings // 0' 2>/dev/null || echo "?")
+        log_ok "Sent $tool_name findings to DetectDojo (total findings: $count)"
+        return 0
+    else
+        log_warn "DetectDojo API returned unexpected response for $tool_name"
+        return 1
     fi
 }
 
@@ -305,44 +349,35 @@ process_tool_output() {
         return 0
     fi
     
-    # Import directly to DetectDojo (network risk tools - no AI processing)
+    # Send to DetectDojo (network risk tools - DetectDojo will normalize via AI)
     local network_risk_tools=("nmap" "masscan" "httpx")
     
     # Check if this is a nmap/masscan/httpx tool (including dynamic names)
     if [[ "$tool_name" =~ ^nmap_ ]] || [[ "$tool_name" =~ ^masscan_ ]] || [[ "$tool_name" =~ ^httpx ]] || [[ " ${network_risk_tools[@]} " =~ " ${tool_name} " ]]; then
         if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            log_info "Importing $tool_name network data directly to DetectDojo (network risk)..."
-            local normalized_output
-            normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-            
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+            log_info "Sending $tool_name network data to DetectDojo for normalization..."
+            send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
         fi
         return 0
     fi
     
-    # Import directly to DetectDojo (no AI processing)
+    # Send to DetectDojo (reconnaissance tools)
     local import_only_tools=("amass")
     
     if [[ " ${import_only_tools[@]} " =~ " ${tool_name} " ]] && [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-        log_info "Importing $tool_name data directly to DetectDojo (no AI processing)..."
-        local normalized_output
-        normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-        
-        echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+        log_info "Sending $tool_name data to DetectDojo for normalization..."
+        send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
         return 0
     fi
     
-    # Import vulnerability assertions directly to DetectDojo (no AI processing)
+    # Send to DetectDojo (vulnerability assertions)
     local vulnerability_assertions=("nuclei" "nmap_vulners")
     
     # Check if this is a vulnerability assertion tool (including dynamic names)
     if [[ " ${vulnerability_assertions[@]} " =~ " ${tool_name} " ]] || [[ "$tool_name" =~ ^nmap_.*_vulners$ ]]; then
         if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            log_info "Importing $tool_name vulnerability assertions directly to DetectDojo..."
-            local normalized_output
-            normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-            
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+            log_info "Sending $tool_name vulnerability findings to DetectDojo for normalization..."
+            send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
         fi
         return 0
     fi
@@ -355,17 +390,14 @@ process_tool_output() {
         return 0
     fi
     
-    # Import web vulnerability assertions directly to DetectDojo (no AI processing)
+    # Send to DetectDojo (web vulnerability assertions)
     local web_vulnerability_assertions=("nikto" "wapiti" "zap")
     
     # Check if this is a web vulnerability assertion tool (including dynamic names)
     if [[ " ${web_vulnerability_assertions[@]} " =~ " ${tool_name} " ]] || [[ "$tool_name" =~ ^katana_nuclei$ ]] || [[ "$tool_name" =~ ^gobuster_nuclei$ ]] || [[ "$tool_name" =~ ^ffuf_nuclei$ ]] || [[ "$tool_name" =~ ^dirsearch_nuclei$ ]]; then
         if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            log_info "Importing $tool_name web vulnerability assertions directly to DetectDojo..."
-            local normalized_output
-            normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-            
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+            log_info "Sending $tool_name web vulnerability findings to DetectDojo for normalization..."
+            send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
         fi
         return 0
     fi
@@ -378,17 +410,14 @@ process_tool_output() {
         return 0
     fi
     
-    # Import database findings directly to DetectDojo (no AI processing)
+    # Send to DetectDojo (database findings)
     local database_findings=("sqlmap" "db_detailed_scan" "database_aggregated")
     
     # Check if this is a database finding tool
     if [[ " ${database_findings[@]} " =~ " ${tool_name} " ]]; then
         if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            log_info "Importing $tool_name database findings directly to DetectDojo..."
-            local normalized_output
-            normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-            
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
+            log_info "Sending $tool_name database findings to DetectDojo for normalization..."
+            send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
         fi
         return 0
     fi
@@ -414,37 +443,11 @@ process_tool_output() {
         fi
         return 0
     fi
-    local ai_tools=()
     
-    # Check if tool needs AI processing
-    if [[ " ${ai_tools[@]} " =~ " ${tool_name} " ]] && [[ "$ENABLE_QWEN_INTEGRATION" == "true" ]]; then
-        log_info "Processing $tool_name output with AI for severity and remediation..."
-        
-        # Send to Qwen for normalization and remediation
-        local normalized_output
-        normalized_output=$(curl -s -X POST "http://localhost:8080/normalize" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"tool_name\": \"$tool_name\",
-                \"tool_output\": \"$(cat "$output_file" | head -c 1000)\",
-                \"target_domain\": \"$TARGET_DOMAIN\"
-            }" 2>/dev/null || echo "")
-        
-        if [[ -n "$normalized_output" ]] && [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            # Send AI-processed output to DetectDojo
-            log_info "Sending AI-processed $tool_name findings to DetectDojo..."
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
-        fi
-    else
-        # Normalize with basic rules then send to DetectDojo
-        if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
-            log_info "Normalizing $tool_name output with basic rules..."
-            local normalized_output
-            normalized_output=$(normalize_basic_tool "$tool_name" "$output_file")
-            
-            log_info "Sending normalized $tool_name findings to DetectDojo..."
-            echo "$normalized_output" | "$DETECTDOJO_SERVICE" send "$tool_name" "$TARGET_DOMAIN" >/dev/null 2>&1 || true
-        fi
+    # Default: Send all other tool outputs to DetectDojo for AI normalization
+    if [[ "$ENABLE_DETECTDOJO_INTEGRATION" == "true" ]]; then
+        log_info "Sending $tool_name output to DetectDojo for AI normalization..."
+        send_to_detectdojo "$tool_name" "$TARGET_DOMAIN" "$output_file"
     fi
 }
 
