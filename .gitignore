@@ -7,3 +7,15 @@ dist/
 build/
 .next/
 out/
+output/
+*.pid
+*.tmp
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
