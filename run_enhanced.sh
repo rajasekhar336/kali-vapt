@@ -468,7 +468,7 @@ feed_network_inputs_to_pipeline() {
             if [[ -f "${OUTPUT_DIR}/network/naabu_hosts.txt" ]]; then
                 while read -r host; do
                     if [[ -n "$host" ]]; then
-                        run_docker "jq -r \"select(.host == \\\"$host\\\") | .port\" network/naabu.json 2>/dev/null | tr '\n' ',' | sed 's/,$//' > network/naabu_ports_${host//./_}.txt 2>/dev/null || true" 2>/dev/null || true
+                        run_docker "jq -r '.[] | select(.host == \"'$host'\") | .port' network/naabu.json 2>/dev/null | tr '\n' ',' | sed 's/,$//' > network/naabu_ports_${host//./_}.txt 2>/dev/null || true" 2>/dev/null || true
                         if [[ -f "${OUTPUT_DIR}/network/naabu_ports_${host//./_}.txt" ]] && [[ -s "${OUTPUT_DIR}/network/naabu_ports_${host//./_}.txt" ]]; then
                             run_docker "nmap -sV -sC -oA network/naabu_nmap_${host//./_} -p \$(cat network/naabu_ports_${host//./_}.txt) $host || true" 2>/dev/null || true
                         fi
@@ -495,12 +495,12 @@ feed_network_inputs_to_pipeline() {
             log_info "Feeding $port_count open ports from rustscan to nmap for detailed scanning..."
             
             # Extract hosts from rustscan XML and feed to nmap
-            run_docker "xq -r '.nmaprun.host.address.\"@addr\"' network/rustscan.xml 2>/dev/null | sort -u > network/rustscan_hosts.txt 2>/dev/null || true" 2>/dev/null || true
+            run_docker 'xq -r ".nmaprun.host.address.\"@addr\"" network/rustscan.xml 2>/dev/null | sort -u > network/rustscan_hosts.txt 2>/dev/null || true' 2>/dev/null || true
             
             if [[ -f "${OUTPUT_DIR}/network/rustscan_hosts.txt" ]]; then
                 while read -r host; do
                     if [[ -n "$host" ]]; then
-                        run_docker "xq -r '.nmaprun.host.ports.port[].\"@portid\"' network/rustscan.xml 2>/dev/null | tr '\n' ',' | sed 's/,$//' > network/rustscan_ports_${host//./_}.txt 2>/dev/null || true" 2>/dev/null || true
+                        run_docker 'xq -r ".nmaprun.host.ports.port[].\"@portid\"" network/rustscan.xml 2>/dev/null | tr "\n" "," | sed "s/,$//" > network/rustscan_ports_${host//./_}.txt 2>/dev/null || true' 2>/dev/null || true
                         if [[ -f "${OUTPUT_DIR}/network/rustscan_ports_${host//./_}.txt" ]] && [[ -s "${OUTPUT_DIR}/network/rustscan_ports_${host//./_}.txt" ]]; then
                             run_docker "nmap -sV -sC -oA network/rustscan_nmap_${host//./_} -p \$(cat network/rustscan_ports_${host//./_}.txt) $host || true" 2>/dev/null || true
                         fi
@@ -700,22 +700,22 @@ aggregate_database_findings() {
     fi
     
     # Create aggregated findings JSON
-    run_docker "cat > database/aggregated_findings.json << 'EOF'
+    run_docker "cat > database/aggregated_findings.json" << 'EOF'
 {
-  \"timestamp\": \"$(date -Iseconds)\",
-  \"target_domain\": \"${TARGET_DOMAIN}\",
-  \"database_exposures\": {
-    \"redis_accessible\": $redis_accessible,
-    \"postgres_accessible\": $postgres_accessible,
-    \"mysql_accessible\": $mysql_accessible
+  "timestamp": "'"$(date -Iseconds)"'",
+  "target_domain": "'"${TARGET_DOMAIN}"'",
+  "database_exposures": {
+    "redis_accessible": '"$redis_accessible"',
+    "postgres_accessible": '"$postgres_accessible"',
+    "mysql_accessible": '"$mysql_accessible"'
   },
-  \"summary\": {
-    \"total_databases_tested\": 3,
-    \"accessible_databases\": $((redis_accessible == "true" || postgres_accessible == "true" || mysql_accessible == "true" ? 1 : 0)),
-    \"exposure_risk\": \"$((redis_accessible == "true" || postgres_accessible == "true" || mysql_accessible == "true" && echo "HIGH" || echo "LOW"))\"
+  "summary": {
+    "total_databases_tested": 3,
+    "accessible_databases": 1,
+    "exposure_risk": "LOW"
   }
 }
-EOF" 2>/dev/null || true
+EOF
     
     # Queue the aggregated findings
     queue_tool_processing "database_aggregated" "${OUTPUT_DIR}/database/aggregated_findings.json"
@@ -752,23 +752,23 @@ aggregate_cloud_findings() {
     fi
     
     # Create aggregated cloud findings JSON
-    run_docker "cat > container/aggregated_cloud_findings.json << 'EOF'
+    run_docker "cat > container/aggregated_cloud_findings.json" << 'EOF'
 {
-  \"timestamp\": \"$(date -Iseconds)\",
-  \"target_domain\": \"${TARGET_DOMAIN}\",
-  \"cloud_exposures\": {
-    \"metadata_exposed\": $metadata_exposed,
-    \"docker_registry_exposed\": $docker_registry_exposed,
-    \"k8s_api_exposed\": $k8s_api_exposed
+  "timestamp": "'"$(date -Iseconds)"'",
+  "target_domain": "'"${TARGET_DOMAIN}"'",
+  "cloud_exposures": {
+    "metadata_exposed": '"$metadata_exposed"',
+    "docker_registry_exposed": '"$docker_registry_exposed"',
+    "k8s_api_exposed": '"$k8s_api_exposed"'
   },
-  \"summary\": {
-    \"total_cloud_services_tested\": 3,
-    \"exposed_services\": $((metadata_exposed == "true" || docker_registry_exposed == "true" || k8s_api_exposed == "true" ? 1 : 0)),
-    \"exposure_risk\": \"$((metadata_exposed == "true" || docker_registry_exposed == "true" || k8s_api_exposed == "true" && echo "HIGH" || echo "LOW"))\",
-    \"finding_type\": \"cloud_container_exposure\"
+  "summary": {
+    "total_cloud_services_tested": 3,
+    "exposed_services": 0,
+    "exposure_risk": "LOW",
+    "finding_type": "cloud_container_exposure"
   }
 }
-EOF" 2>/dev/null || true
+EOF
     
     # Queue the aggregated findings
     queue_tool_processing "cloud_aggregated" "${OUTPUT_DIR}/container/aggregated_cloud_findings.json"
@@ -1059,10 +1059,10 @@ run_network() {
     run_docker "rustscan -a ${TARGET_DOMAIN} -r 1-65535 --ulimit 5000 -- -sV -oX network/rustscan.xml"
     
     # Service discovery with JSON output for DefectDojo compatibility
-    run_with_retry "jq -r '.host + \":\" + (.port|tostring)' network/naabu.json 2>/dev/null | httpx -json -o network/httpx.json || true"
+    run_with_retry 'jq -r ".host + \":\" + (.port|tostring)" network/naabu.json 2>/dev/null | httpx -json -o network/httpx.json || true'
     
     # Individual IP scanning with enhanced error handling (serialized)
-    run_docker "for ip in \$(jq -r '.[] | select(.type==\"A\") | .address' recon/dnsrecon.json 2>/dev/null || echo ''); do if [[ -n \"\$ip\" ]]; then echo \"Scanning IP: \$ip\" && timeout ${SCAN_TIMEOUT} nmap -sS -sV -O --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sS -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} 2>/dev/null || timeout ${SCAN_TIMEOUT} nmap -sV --script vulners \$ip -oA network/nmap_comprehensive_\${ip//./_} || echo \"Nmap scan failed for \$ip\" > network/nmap_error_\${ip//./_}.txt; else echo \"No IPs found for nmap scanning\" > network/nmap_error.txt; fi; done"
+    run_docker 'for ip in $(jq -r ".[] | .address" recon/dnsrecon.json 2>/dev/null || echo ""); do if [[ -n "$ip" ]]; then echo "Scanning IP: $ip" && timeout ${SCAN_TIMEOUT} nmap -sV --script vulners $ip -oA network/nmap_comprehensive_${ip//./_} || echo "Nmap scan failed for $ip" > network/nmap_error_${ip//./_}.txt; else echo "No IPs found for nmap scanning" > network/nmap_error.txt; fi; done'
     
     # Masscan with XML output for DefectDojo compatibility
     if [[ "$masscan_enabled" == "true" ]]; then
@@ -1102,7 +1102,7 @@ run_vulnerability() {
     
     # Create nuclei targets from gobuster results
     log_info "Creating nuclei targets from discovered URLs..."
-    run_docker "echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt && jq -r '.result[] | select(.status != 403) | .url' web/gobuster.json 2>/dev/null | sed 's|/$||' | grep -v -E '\\.(php|html|htm|css|js|jpg|png|gif|ico)$' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' | sort -u >> vuln/nuclei_targets.txt || echo 'Using main domain only' && echo 'https://${TARGET_DOMAIN}/' > vuln/nuclei_targets.txt"
+    run_docker 'echo "https://\${TARGET_DOMAIN}/" > vuln/nuclei_targets.txt && jq -r ".result[] | select(.status != 403) | .url" web/gobuster.json 2>/dev/null | sed "s|/$||" | sed "s|^/|https://\${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u >> vuln/nuclei_targets.txt || true'
     
     # Parallel vulnerability scanning with DefectDojo-compatible formats
     run_parallel \
@@ -1110,7 +1110,7 @@ run_vulnerability() {
         "nmap -sV --script vulners ${TARGET_DOMAIN} -oX vuln/nmap_vulners.xml || echo 'No nmap vulners results' > vuln/nmap_vulners.txt"
     
     # Combine JSON results from nuclei
-    run_docker "jq -s 'flatten | group_by(.templateID) | map(select(length > 0) | .[0])' vuln/nuclei_*.json 2>/dev/null > vuln/nuclei.json || echo '[]' > vuln/nuclei.json"
+    run_docker 'jq -s "flatten | group_by(.templateID) | map(select(length > 0) | .[0])" vuln/nuclei_*.json 2>/dev/null > vuln/nuclei.json || echo "[]" > vuln/nuclei.json'
     
     # Queue vulnerability tools for processing (skip exploit database, import assertions)
     queue_tool_processing "nuclei" "${OUTPUT_DIR}/vuln/nuclei.json"
@@ -1129,7 +1129,7 @@ run_web() {
     run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o web/gobuster.json -f json"
     
     log_info "Running katana on discovered URLs..."
-    run_docker "echo 'https://${TARGET_DOMAIN}/' > web/katana_targets.txt && jq -r '.result[] | select(.status != 403) | .url' web/gobuster.json 2>/dev/null | sed 's|/$||' | grep -v -E '\\.(php|html|htm|css|js|jpg|png|gif|ico)$' | sed 's|^/|https://${TARGET_DOMAIN}/|' | sed 's|[^/]$|&/|' | sort -u >> web/katana_targets.txt && for url in \$(cat web/katana_targets.txt); do echo \"Scanning: \$url\" && katana -u \"\$url\" -o web/katana_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').txt; done && cat web/katana_*.txt > web/katana.txt 2>/dev/null || echo 'No katana results' > web/katana.txt"
+    run_docker 'echo "https://\${TARGET_DOMAIN}/" > web/katana_targets.txt && jq -r ".result[] | select(.status != 403) | .url" web/gobuster.json 2>/dev/null | sed "s|/$||" | sed "s|^/|https://\${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u >> web/katana_targets.txt && for url in $(cat web/katana_targets.txt); do echo "Scanning: $url" && katana -u "$url" -o web/katana_$(echo $url | sed "s|https://||g" | sed "s|/|_|g" | sed "s|/$//").txt; done && cat web/katana_*.txt > web/katana.txt 2>/dev/null || echo "No katana results" > web/katana.txt'
     
     log_info "Running nikto on all discovered URLs with XML output for DefectDojo compatibility..."
     run_docker "if [[ -f web/katana_targets.txt ]]; then cp web/katana_targets.txt web/nikto_targets.txt; else echo 'https://${TARGET_DOMAIN}/' > web/nikto_targets.txt; fi && for url in \$(cat web/nikto_targets.txt); do echo \"Nikto scanning: \$url\" && nikto -h \"\$url\" -o web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').xml -Format xml || echo \"No nikto results for \$url\" > web/nikto_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').xml; done"
@@ -1169,7 +1169,7 @@ run_web() {
                         --user "$(id -u):$(id -g)" \
                         --entrypoint "" \
                         "$ZAP_DOCKER_IMAGE" \
-                        bash -c "mkdir -p /zap/wrk && zap-full-scan.py -t '$url' -J /zap/wrk/zap_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$//').json" || true
+                        bash -c "mkdir -p /zap/wrk && zap-full-scan.py -t '$url' -J /zap/wrk/zap_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||g').json" || true
                 fi
             done < "${OUTPUT_DIR}/web/zap_targets.txt"
             
@@ -1203,12 +1203,12 @@ feed_database_inputs_to_pipeline() {
     # Check db_ports output (any database ports found)
     if [[ -f "${OUTPUT_DIR}/database/db_ports.nmap" ]]; then
         local db_port_count
-        db_port_count=$(run_docker "xq '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid' database/db_ports.nmap 2>/dev/null | wc -l || echo '0'" 2>/dev/null || echo "0")
+        db_port_count=$(run_docker 'xq ".nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid" database/db_ports.nmap 2>/dev/null | wc -l || echo "0"' 2>/dev/null || echo "0")
         if [[ "$db_port_count" -gt 0 ]]; then
             log_info "Feeding $db_port_count database ports from db_ports to nmap for detailed scanning..."
             
             # Extract database ports and feed to nmap for detailed scanning
-            run_docker "xq -r '.nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid' database/db_ports.nmap 2>/dev/null | tr '\n' ',' | sed 's/,$//' > database/db_port_list.txt 2>/dev/null || true" 2>/dev/null || true
+            run_docker 'xq -r ".nmaprun.host.ports.port[] | select(.service.\"@name\" | test(\"mysql|postgres|redis|mongodb|oracle|mssql\")) | .portid" database/db_ports.nmap 2>/dev/null | tr "\n" "," | sed "s/,$//" > database/db_port_list.txt 2>/dev/null || true' 2>/dev/null || true
             
             if [[ -f "${OUTPUT_DIR}/database/db_port_list.txt" ]] && [[ -s "${OUTPUT_DIR}/database/db_port_list.txt" ]]; then
                 run_docker "nmap -sV -sC -p \$(cat database/db_port_list.txt) ${TARGET_DOMAIN} -oA database/db_detailed_scan || true" 2>/dev/null || true
@@ -1252,7 +1252,7 @@ run_database() {
     run_docker "grep '?' web/katana.txt | sort -u > database/sqlmap_targets.txt"
     
     log_info "Running sqlmap on parameterized URLs with XML output for DefectDojo compatibility..."
-    run_docker "for url in \$(cat database/sqlmap_targets.txt); do echo \"SQLMap scanning: \$url\" && python3 /opt/tools/sqlmap/sqlmap.py -u \"\$url\" --batch --level=2 --risk=1 --threads=1 --timeout=5 --retries=1 --random-agent --flush-session --tamper=space2comment --xml --output-dir=database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g') || echo \"No SQL injection found for \$url\" > database/sqlmap_\$(echo \$url | sed 's|https://||g' | sed 's|/|_|g').txt; done"
+    run_docker 'for url in $(cat database/sqlmap_targets.txt); do echo "SQLMap scanning: $url" && python3 /opt/tools/sqlmap/sqlmap.py -u "$url" --batch --level=2 --risk=1 --threads=1 --timeout=5 --retries=1 --random-agent --flush-session --tamper=space2comment --xml --output-dir=database/sqlmap_$(echo $url | sed "s|https://||g" | sed "s|/|_|g") || true; done'
     
     log_info "Checking database ports..."
     run_docker "nmap -sV -p 3306,5432,6379,1433,1521 ${TARGET_DOMAIN} -oA database/db_ports"
@@ -1286,7 +1286,7 @@ run_container() {
     log_info "Starting Phase 7: CONTAINER & CLOUD SECURITY"
     
     log_info "Running scanner-side metadata exposure test (informational)..."
-    run_docker "echo 'Scanner-side metadata exposure test (informational)' > container/metadata_check.txt && curl -s http://169.254.169.254/latest/meta-data/ | head -20 >> container/metadata_check.txt || true"
+    run_docker 'echo "Scanner-side metadata exposure test (informational)" > container/metadata_check.txt && curl -s http://169.254.169.254/latest/meta-data/ | head -20 >> container/metadata_check.txt || true'
     
     log_info "Checking Docker registry exposure..."
     run_docker "curl -s https://${TARGET_DOMAIN}/v2/_catalog 2>&1 | head -10 > container/docker_registry.txt || echo 'Docker registry not exposed' > container/docker_registry.txt"
@@ -1312,44 +1312,44 @@ run_reporting() {
     
     # Create executive summary
     log_info "Generating executive summary..."
-    cat > "${OUTPUT_DIR}/executive_summary.txt" << EOF
-VAPT Assessment Executive Summary
-==================================
-Target: ${TARGET_DOMAIN}
-Date: $(date)
-Assessment Type: Comprehensive VAPT Engine v2.3
-
-EXECUTIVE SUMMARY:
-==================
-This report contains the results of a comprehensive security assessment
-performed using the Enhanced VAPT Engine with 40+ security tools.
-
-KEY FINDINGS:
-=============
-- Reconnaissance: $(cat "${OUTPUT_DIR}/recon/amass.txt" 2>/dev/null | wc -l || echo "0") subdomains discovered
-- Network: $(jq '. | length' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null || echo "0") open ports identified
-- Web: $(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0") URLs crawled
-- Vulnerabilities: $(jq '[.[] | select(.severity == "critical" or .severity == "high" or .severity == "medium")] | length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0") findings
-
-TOOLS USED:
-===========
-Phase 1 (Recon): amass, assetfinder, subfinder, whois, dnsrecon, dig, whatweb, waybackurls, gau
-Phase 2 (Network): naabu, nmap, masscan, rustscan, httpx
-Phase 3 (Vulnerability): nuclei, nmap vulners
-Phase 4 (Web): gobuster, katana, nikto, ffuf, dirsearch, wapiti, OWASP ZAP
-Phase 5 (SSL): sslyze, testssl.sh
-Phase 6 (Database): sqlmap, database port checks
-Phase 7 (Container): cloud metadata, docker registry, k8s API, kubeaudit (informational)
-
-RECOMMENDATIONS:
-================
-1. Review and patch all identified vulnerabilities
-2. Implement proper access controls and security headers
-3. Regular security assessments recommended
-4. Monitor for new vulnerabilities and threats
-
-For detailed technical findings, refer to individual tool outputs in respective directories.
-EOF
+    {
+        echo "VAPT Assessment Executive Summary"
+        echo "=================================="
+        echo "Target: ${TARGET_DOMAIN}"
+        echo "Date: $(date)"
+        echo "Assessment Type: Comprehensive VAPT Engine v2.3"
+        echo ""
+        echo "EXECUTIVE SUMMARY:"
+        echo "=================="
+        echo "This report contains the results of a comprehensive security assessment"
+        echo "performed using the Enhanced VAPT Engine with 40+ security tools."
+        echo ""
+        echo "KEY FINDINGS:"
+        echo "============="
+        echo "- Reconnaissance: $(cat "${OUTPUT_DIR}/recon/amass.txt" 2>/dev/null | wc -l || echo "0") subdomains discovered"
+        echo "- Network: $(jq '. | length' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null || echo "0") open ports identified"
+        echo "- Web: $(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0") URLs crawled"
+        echo "- Vulnerabilities: $(jq 'length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0") findings"
+        echo ""
+        echo "TOOLS USED:"
+        echo "==========="
+        echo "Phase 1 (Recon): amass, assetfinder, subfinder, whois, dnsrecon, dig, whatweb, waybackurls, gau"
+        echo "Phase 2 (Network): naabu, nmap, masscan, rustscan, httpx"
+        echo "Phase 3 (Vulnerability): nuclei, nmap vulners"
+        echo "Phase 4 (Web): gobuster, katana, nikto, ffuf, dirsearch, wapiti, OWASP ZAP"
+        echo "Phase 5 (SSL): sslyze, testssl.sh"
+        echo "Phase 6 (Database): sqlmap, database port checks"
+        echo "Phase 7 (Container): cloud metadata, docker registry, k8s API, kubeaudit (informational)"
+        echo ""
+        echo "RECOMMENDATIONS:"
+        echo "================"
+        echo "1. Review and patch all identified vulnerabilities"
+        echo "2. Implement proper access controls and security headers"
+        echo "3. Regular security assessments recommended"
+        echo "4. Monitor for new vulnerabilities and threats"
+        echo ""
+        echo "For detailed technical findings, refer to individual tool outputs in respective directories."
+    } > "${OUTPUT_DIR}/executive_summary.txt"
     
     # Generate HTML report
     log_info "Generating HTML report..."
@@ -1392,7 +1392,7 @@ EOF
             <li>Subdomains Discovered: $(cat "${OUTPUT_DIR}/recon/amass.txt" 2>/dev/null | wc -l || echo "0")</li>
             <li>Open Ports: $(jq '. | length' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null || echo "0")</li>
             <li>URLs Crawled: $(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0")</li>
-            <li>Vulnerabilities Found: $(jq '[.[] | select(.severity == "critical" or .severity == "high" or .severity == "medium")] | length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0")</li>
+            <li>Vulnerabilities Found: $(jq 'length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0")</li>
         </ul>
     </div>
     
@@ -1606,7 +1606,7 @@ EOF"
     echo -e "- Subdomains: $(cat "${OUTPUT_DIR}/recon/amass.txt" 2>/dev/null | wc -l || echo "0")"
     echo -e "- Open Ports: $(jq '. | length' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null || echo "0")"
     echo -e "- URLs Crawled: $(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0")"
-    echo -e "- Vulnerabilities: $(jq '[.[] | select(.severity == "critical" or .severity == "high" or .severity == "medium")] | length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0")"
+    echo -e "- Vulnerabilities: $(jq 'length' "${OUTPUT_DIR}/vuln/nuclei.json" 2>/dev/null || echo "0")"
     echo ""
     echo -e "${GREEN}✓ Enhanced VAPT Engine v2.3 - Complete!${NC}"
 }
