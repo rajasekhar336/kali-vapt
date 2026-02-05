@@ -49,7 +49,7 @@ def get_detailed_remediation(issue_type, issue_title, url, description):
 6. Use framework-provided XSS protection (e.g., express-validator, Django forms).
 7. Test with XSS payloads: <script>alert('XSS')</script>, \"onerror=\"alert(1)""",
             "code_examples": {
-                "javascript": "const escapeHtml = (unsafe) => unsafe.replace(/[&<>"']/g, (m) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', \"'\": '&#39;'}[m]));",
+                "javascript": "const escapeHtml = (unsafe) => unsafe.replace(/[&<>'\"]/g, (m) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', '\\\"': '&#39;'}));",
                 "python": "import html\ndef escape_html(text): return html.escape(text, quote=True)",
                 "php": "$escaped = htmlspecialchars($input, ENT_QUOTES, 'UTF-8');"
             }

@@ -157,6 +157,17 @@ def add_findings():
         
         logger.info(f"Received {tool_name} output for {target_domain}")
         
+        # Handle JSON tool_output properly
+        try:
+            import json as json_module
+            # If tool_output looks like JSON, parse it
+            if isinstance(tool_output, str) and tool_output.strip().startswith('[') and tool_output.strip().endswith(']'):
+                tool_output = json_module.loads(tool_output)
+                logger.info(f"Parsed JSON output for {tool_name}")
+        except:
+            # If parsing fails, use as string
+            logger.info(f"Using tool_output as string for {tool_name}")
+        
         # Get or create assessment
         assessment_id, assessment = get_or_create_assessment(target_domain)
         

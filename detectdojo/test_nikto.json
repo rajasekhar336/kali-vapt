@@ -1,0 +1,1 @@
+[{"host":"ckvapt.channelkonnect.com","ip":"13.127.144.247","port":"443","vulnerabilities":[{"id":"999962","method":"GET","url":"/","msg":"Server banner changed from Apache to awselb/2.0"}]}]

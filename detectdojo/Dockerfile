@@ -12,7 +12,7 @@ RUN mkdir -p /app/logs
 
 # Copy application files
 COPY app.py /app/
-COPY requirements.txt /app/ || true
+COPY requirements.txt /app/
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
