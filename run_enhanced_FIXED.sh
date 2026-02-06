@@ -20,12 +20,11 @@ DRY_RUN=false
 EXECUTION_MODE='strict'
 DOCKER_IMAGE='rajatherise/kali-vapt-image:latest'
 OUTPUT_DIR='/var/log/output'
-LOG_FILE='/var/log/execution.log'
+LOG_FILE='/var/production/logs/execution.log'
 ZAP_DOCKER_IMAGE='ghcr.io/zaproxy/zaproxy:stable'
 ZAP_TIMEOUT_MINUTES=30
 MAX_PARALLEL_SCANS=1
 SCAN_TIMEOUT=600
-PORT_SCAN_TIMEOUT=600
 RATE_LIMIT=100
 DOCKER_CPU_LIMIT="1.5"
 DOCKER_MEMORY_LIMIT="2g"
@@ -82,9 +81,7 @@ run_docker() {
         echo "[DRY-RUN] docker run --rm -v ${OUTPUT_DIR}:/output $DOCKER_IMAGE bash -c '$cmd'"
         return 0
     fi
-    # Create directories first
-    mkdir -p "${OUTPUT_DIR}"/{recon,network,vuln,web,ssl,database,container}
-    docker run --rm -v "${OUTPUT_DIR}:/output" -e "TARGET_DOMAIN=$TARGET_DOMAIN" "$DOCKER_IMAGE" bash -c "mkdir -p /output/{recon,network,vuln,web,ssl,database,container} && $cmd" || {
+    docker run --rm -v "${OUTPUT_DIR}:/output" -e "TARGET_DOMAIN=$TARGET_DOMAIN" "$DOCKER_IMAGE" bash -c "$cmd" || {
         log_error "Docker command failed: $cmd"
         return 1
     }
@@ -166,7 +163,7 @@ run_vulnerability() {
     run_docker 'echo "https://${TARGET_DOMAIN}/" > /output/vuln/nuclei_targets.txt' || true
     
     log_info "Running nuclei for vulnerability detection..."
-    run_docker 'nuclei -l /output/vuln/nuclei_targets.txt -o /output/vuln/nuclei.json 2>/dev/null || echo "[]" > /output/vuln/nuclei.json' || true
+    run_docker 'nuclei -l /output/vuln/nuclei_targets.txt -json -o /output/vuln/nuclei.json 2>/dev/null || echo "[]" > /output/vuln/nuclei.json' || true
     
     log_ok "Vulnerability assessment completed"
 }

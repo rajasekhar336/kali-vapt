@@ -48,12 +48,12 @@ RUN strip /opt/go/bin/* || true
 RUN git clone https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap && \
     git clone https://github.com/laramies/metagoofil.git /opt/metagoofil && \
     git clone https://github.com/drwetter/testssl.sh.git /opt/testssl && \
-    mkdir -p /opt/wordlists/SecLists/Discovery/Web-Content && \
-    curl -s https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/Web-Content/common.txt -o /opt/wordlists/SecLists/Discovery/Web-Content/common.txt && \
+    git clone https://github.com/danielmiessler/SecLists.git /opt/SecLists && \
     rm -rf \
       /opt/sqlmap/.git \
       /opt/metagoofil/.git \
-      /opt/testssl/.git
+      /opt/testssl/.git \
+      /opt/SecLists/.git
 
 # -------------------------------
 # RustScan
@@ -67,7 +67,7 @@ RUN curl -L https://github.com/RustScan/RustScan/releases/download/2.0.1/rustsca
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH=$PATH:/opt/tools/bin:/home/pentester/.local/bin:/home/pentester/.cargo/bin
+ENV PATH=$PATH:/opt/tools/bin:/home/pentester/.local/bin
 
 # -------------------------------
 # Runtime dependencies only
@@ -86,10 +86,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     util-linux \
     libxml2-utils \
-    bsdmainutils \
-    build-essential \
-    pkg-config \
-    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Remove docs/locales (shrink image)
@@ -113,7 +109,7 @@ COPY --from=builder /opt/go/bin/* /opt/tools/bin/
 COPY --from=builder /opt/sqlmap /opt/tools/sqlmap
 COPY --from=builder /opt/metagoofil /opt/tools/metagoofil
 COPY --from=builder /opt/testssl /opt/tools/testssl
-COPY --from=builder /opt/wordlists /opt/wordlists
+COPY --from=builder /opt/SecLists /opt/wordlists/SecLists
 COPY --from=builder /tmp/rustscan.deb /tmp/rustscan.deb
 
 RUN dpkg -i /tmp/rustscan.deb && rm /tmp/rustscan.deb
@@ -138,12 +134,5 @@ RUN pip install --break-system-packages pipx && \
     pipx install shodan && \
     pipx inject shodan setuptools && \
     pipx install sslyze 
-
-# -------------------------------
-# Install Rust and feroxbuster
-# -------------------------------
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
-    . "$HOME/.cargo/env" && \
-    cargo install feroxbuster 
 
 CMD ["/bin/bash"]
