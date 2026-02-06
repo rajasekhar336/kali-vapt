@@ -139,6 +139,7 @@ normalize_with_qwen() {
     fi
     
     # Call Qwen service for normalization
+    local payload=$(jq -n --arg file "$(cat "$input_file")" '{file: $file}')
     if curl -s -X POST "${AI_SERVICE_URL}/normalize" \
         -H 'Content-Type: application/json' \
         -d "$payload" \
@@ -261,9 +262,10 @@ send_chunked_to_detectdojo() {
             local chunk_data
             chunk_data=$(cat "$chunk_file")
             
+            local payload=$(jq -n --arg tool_name "$tool_name" --arg target_domain "$target_domain" --arg tool_output "$(jq -Rs . <<< "$chunk_data")" --arg chunk "$chunk_num" '{tool_name: $tool_name, target_domain: $target_domain, tool_output: $tool_output, chunk: $chunk}')
             curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
                 -H 'Content-Type: application/json' \
-                -d "{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": \"$(jq -Rs . <<< "$chunk_data")\", \"chunk\": \"$chunk_num\"}" || true
+                -d "$payload" || true
             
             ((chunk_num++))
             rm -f "$chunk_file"
@@ -1076,6 +1078,5 @@ main() {
     echo ""
     echo -e "${GREEN}✓ Enterprise VAPT Engine v2.3 - Complete!${NC}"
 }
-
 # Execute main function
 main "$@"
