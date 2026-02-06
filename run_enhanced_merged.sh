@@ -809,7 +809,7 @@ run_ssl() {
     queue_tool_processing "sslyze" "${OUTPUT_DIR}/ssl/sslyze.json" "ssl"
     
     log_info "Running testssl for SSL/TLS testing..."
-    run_docker "/opt/tools/testssl/testssl.sh --jsonfile /output/ssl/testssl.json ${TARGET_DOMAIN}:443" 2>/dev/null || echo '{\"error\": \"testssl.sh dependency issue\", \"alternative\": \"sslyze completed successfully\"}' > /output/ssl/testssl.json"
+    run_docker "/opt/tools/testssl/testssl.sh --jsonfile /output/ssl/testssl.json ${TARGET_DOMAIN}:443 2>/dev/null || echo '{\"error\": \"testssl.sh dependency issue\", \"alternative\": \"sslyze completed successfully\"}' > /output/ssl/testssl.json"
     queue_tool_processing "testssl" "${OUTPUT_DIR}/ssl/testssl.json" "ssl"
     
     log_ok "SSL/TLS assessment completed"
