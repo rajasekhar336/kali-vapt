@@ -271,7 +271,28 @@ send_chunked_to_detectdojo() {
     done
     
     log_info "Sent $((chunk_num - 1)) chunks for $tool_name to DetectDojo"
-}
+        log_info "Reassembling chunks for $tool_name..."
+        # Reassemble chunks in order
+        local reassembled_file="${OUTPUT_DIR}/reasssembled_${tool_name}.json"
+        local chunk_count=0
+        for chunk_file in "${output_file}.chunk_"*; do
+            ((chunk_count++))
+            cat "$chunk_file" >> "$reassembled_file"
+        done
+        
+        # Send reassembled file to DetectDojo
+        if [[ -f "$reassembled_file" ]] && [[ -s "$reassembled_file" ]]; then
+            log_info "Sending reassembled $tool_name results to DetectDojo"
+            curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
+                -H 'Content-Type: application/json' \
+                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -Rs . < "$reassembled_file")}' || true
+            queue_tool_processing "${tool_name}_reasssembled" "${OUTPUT_DIR}/reasssembled_${tool_name}.json" "vulnerability"
+        else
+            log_warn "Reassembly failed for $tool_name - no chunks found"
+        fi
+    else
+        log_warn "No chunks found for $tool_name reassembly"
+    fi
 
 # Queue tool for batch processing
 queue_tool_processing() {
@@ -636,12 +657,36 @@ run_vulnerability() {
     queue_tool_processing "cve-search" "${OUTPUT_DIR}/vuln/cve_search.txt" "vulnerability"
     
     log_info "Running sploitus for exploit search..."
-    run_docker 'sploitus -s ${TARGET_DOMAIN} -o /output/vuln/sploitus.json 2>/dev/null || echo "[]" > /output/vuln/sploitus.json' || true
-    queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
+    # Enhanced logic: extract technology stack from reconnaissance data
+    if [[ -f "${OUTPUT_DIR}/recon/whatweb.txt" ]] || [[ -f "${OUTPUT_DIR}/network/nmap_detailed.xml" ]]; then
+        # Extract technologies from whatweb and nmap results
+        TECH_STACK=$(cat "${OUTPUT_DIR}/recon/whatweb.txt" "${OUTPUT_DIR}/network/nmap_detailed.xml" 2>/dev/null | grep -iE "(apache|nginx|wordpress|joomla|drupal|tomcat|iis|php|python|node|mysql|postgresql|redis|mongodb)" | head -10 > "${OUTPUT_DIR}/vuln/tech_stack.txt" || echo "${TARGET_DOMAIN}" > "${OUTPUT_DIR}/vuln/tech_stack.txt")
+        if [[ -s "$TECH_STACK" ]]; then
+            log_info "Found technology stack: $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ',')"
+            # Search sploitus for each technology
+            for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
+                echo "Searching sploitus for: $tech" && sploitus -s "$tech" -o "/output/vuln/sploitus_${tech}.json" 2>/dev/null || echo "[]" > "/output/vuln/sploitus_${tech}.json"; done && jq -s "add" /output/vuln/sploitus_*.json 2>/dev/null > "${OUTPUT_DIR}/vuln/sploitus.json" || echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"' || true
+            queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
+        else
+            log_warn "No technology stack found, skipping sploitus search"
+            echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"
+            queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
+        fi
+    else
+        log_warn "Sploitus search skipped - no reconnaissance data available"
+        touch "${OUTPUT_DIR}/vuln/sploitus.json"
+        queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
+    fi
     
     log_info "Running exploitdb search..."
-    run_docker 'searchsploit ${TARGET_DOMAIN} > /output/vuln/exploitdb.txt 2>/dev/null || touch /output/vuln/exploitdb.txt' || true
-    queue_tool_processing "exploitdb" "${OUTPUT_DIR}/vuln/exploitdb.txt" "vulnerability"
+    # Enhanced logic: use extracted technology stack for targeted searches
+    if [[ -f "${OUTPUT_DIR}/vuln/tech_stack.txt" ]]; then
+        for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
+            echo "Searching exploitdb for: $tech" && searchsploit "$tech" >> /output/vuln/exploitdb.txt 2>/dev/null || true; done || searchsploit ${TARGET_DOMAIN} > /output/vuln/exploitdb.txt 2>/dev/null || touch /output/vuln/exploitdb.txt' || true
+        else
+            log_warn "No technology stack found, skipping exploitdb search"
+            touch "${OUTPUT_DIR}/vuln/exploitdb.txt"
+        fi
     
     log_ok "Vulnerability assessment completed"
     
