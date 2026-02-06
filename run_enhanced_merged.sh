@@ -493,7 +493,26 @@ run_with_retry() {
 
 # Initialize directories
 init_directories() {
+    # Create timestamped directory for this scan
+    local scan_timestamp=$(date +"%Y%m%d_%H%M%S")
+    local scan_dir="${OUTPUT_DIR}/${TARGET_DOMAIN}_${scan_timestamp}"
+    
     log_info "Initializing output directories..."
+    log_info "Output directory: ${scan_dir}"
+    
+    # Create scan-specific directory and set ownership
+    mkdir -p "${scan_dir}" || {
+        log_error "Failed to create scan directory: ${scan_dir}"
+        exit 1
+    }
+    
+    # Set proper ownership for the scan directory
+    sudo chown -R ubuntu:ubuntu "${scan_dir}" 2>/dev/null || true
+    
+    # Update OUTPUT_DIR to point to timestamped directory
+    OUTPUT_DIR="${scan_dir}"
+    
+    # Create subdirectories
     mkdir -p "${OUTPUT_DIR}"/{recon,network,web,ssl,database,container,vuln} || {
         log_error "Failed to create output directories"
         exit 1
@@ -523,41 +542,41 @@ run_recon() {
     log_info "Starting Phase 1: RECONNAISSANCE"
     
     log_info "Running amass for subdomain enumeration..."
-    run_docker 'amass enum -d ${TARGET_DOMAIN} -o /output/recon/amass.txt 2>/dev/null || touch /output/recon/amass.txt' || true
+    run_docker "amass enum -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/amass.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/amass.txt" || true
     queue_tool_processing "amass" "${OUTPUT_DIR}/recon/amass.txt" "recon"
     
     log_info "Running subfinder for subdomain discovery..."
-    run_docker 'subfinder -d ${TARGET_DOMAIN} -o /output/recon/subfinder.txt 2>/dev/null || touch /output/recon/subfinder.txt' || true
+    run_docker "subfinder -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/subfinder.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/subfinder.txt" || true
     queue_tool_processing "subfinder" "${OUTPUT_DIR}/recon/subfinder.txt" "recon"
     
     log_info "Running assetfinder for asset discovery..."
-    run_docker 'assetfinder --subs-only ${TARGET_DOMAIN} > /output/recon/assetfinder.txt 2>/dev/null || touch /output/recon/assetfinder.txt' || true
+    run_docker "assetfinder --subs-only ${TARGET_DOMAIN} > ${OUTPUT_DIR}/recon/assetfinder.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/assetfinder.txt" || true
     queue_tool_processing "assetfinder" "${OUTPUT_DIR}/recon/assetfinder.txt" "recon"
     
     log_info "Running sublist3r for subdomain enumeration..."
-    run_docker 'sublist3r -d ${TARGET_DOMAIN} -o /output/recon/sublist3r.txt 2>/dev/null || touch /output/recon/sublist3r.txt' || true
+    run_docker "sublist3r -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/sublist3r.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/sublist3r.txt" || true
     queue_tool_processing "sublist3r" "${OUTPUT_DIR}/recon/sublist3r.txt" "recon"
     
     log_info "Running DNS reconnaissance..."
     # DNS reconnaissance with timeout and fallback
-    run_docker "dig +short ${TARGET_DOMAIN} @8.8.8.8 +timeout 10 > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt"
-    run_docker "dnsrecon -d ${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo '{}' > /output/recon/dnsrecon.json"
+    run_docker "dig +short ${TARGET_DOMAIN} @8.8.8.8 +timeout 10 > ${OUTPUT_DIR}/recon/dig.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/dig.txt"
+    run_docker "dnsrecon -d ${TARGET_DOMAIN} -j ${OUTPUT_DIR}/recon/dnsrecon.json 2>/dev/null || echo '{}' > ${OUTPUT_DIR}/recon/dnsrecon.json"
     queue_tool_processing "dnsrecon" "${OUTPUT_DIR}/recon/dnsrecon.json" "recon"
     
     log_info "Running dnsx for DNS enumeration..."
-    run_docker 'dnsx -d ${TARGET_DOMAIN} -a -aaaa -cname -mx -ns -txt -soa -json -o /output/recon/dnsx.json 2>/dev/null || echo "[]" > /output/recon/dnsx.json' || true
+    run_docker "dnsx -d ${TARGET_DOMAIN} -a -aaaa -cname -mx -ns -txt -soa -json -o ${OUTPUT_DIR}/recon/dnsx.json 2>/dev/null || echo '[]' > ${OUTPUT_DIR}/recon/dnsx.json" || true
     queue_tool_processing "dnsx" "${OUTPUT_DIR}/recon/dnsx.json" "recon"
     
     log_info "Running dnsenum for DNS enumeration..."
-    run_docker 'dnsenum ${TARGET_DOMAIN} -o /output/recon/dnsenum.txt 2>/dev/null || touch /output/recon/dnsenum.txt' || true
+    run_docker "dnsenum ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/dnsenum.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/dnsenum.txt" || true
     queue_tool_processing "dnsenum" "${OUTPUT_DIR}/recon/dnsenum.txt" "recon"
     
     log_info "Running fierce for DNS enumeration..."
-    run_docker 'fierce -dns ${TARGET_DOMAIN} -file /output/recon/fierce.txt 2>/dev/null || touch /output/recon/fierce.txt' || true
+    run_docker "fierce -dns ${TARGET_DOMAIN} -file ${OUTPUT_DIR}/recon/fierce.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/fierce.txt" || true
     queue_tool_processing "fierce" "${OUTPUT_DIR}/recon/fierce.txt" "recon"
     
     log_info "Running WhatWeb for technology detection..."
-    run_docker 'whatweb ${TARGET_DOMAIN} > /output/recon/whatweb.txt 2>/dev/null || touch /output/recon/whatweb.txt'
+    run_docker "whatweb ${TARGET_DOMAIN} > ${OUTPUT_DIR}/recon/whatweb.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/whatweb.txt"
     queue_tool_processing "whatweb" "${OUTPUT_DIR}/recon/whatweb.txt" "recon"
     
     log_ok "Reconnaissance completed"
@@ -566,7 +585,6 @@ run_recon() {
     process_batch_results "recon"
 }
 
-# Phase 2: NETWORK SCANNING
 run_network() {
     log_info "Starting Phase 2: NETWORK SCANNING"
     
@@ -583,7 +601,7 @@ run_network() {
         # Resolve domain to IP first for masscan
         MASSCAN_TARGET_IP=$(dig +short ${TARGET_DOMAIN} | head -1)
         if [[ -n "$MASSCAN_TARGET_IP" ]]; then
-            run_docker "masscan $MASSCAN_TARGET_IP -p1-65535 --rate=1000 -oL /output/network/masscan.txt 2>/dev/null || touch /output/network/masscan.txt" || true
+            run_docker "masscan $MASSCAN_TARGET_IP -p1-65535 --rate=1000 -oL ${OUTPUT_DIR}/network/masscan.txt 2>/dev/null || touch ${OUTPUT_DIR}/network/masscan.txt" || true
             queue_tool_processing "masscan" "${OUTPUT_DIR}/network/masscan.txt" "network"
         else
             log_warn "Could not resolve ${TARGET_DOMAIN} to IP, skipping masscan scan"
@@ -591,7 +609,7 @@ run_network() {
         fi
         
         log_info "Running rustscan for additional fast port scanning..."
-        run_docker 'rustscan -a ${TARGET_DOMAIN} -o /output/network/rustscan.txt 2>/dev/null || touch /output/network/rustscan.txt' || true
+        run_docker "rustscan -a ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/network/rustscan.txt 2>/dev/null || touch ${OUTPUT_DIR}/network/rustscan.txt" || true
         queue_tool_processing "rustscan" "${OUTPUT_DIR}/network/rustscan.txt" "network"
     else
         log_info "Aggressive network scanning disabled - using naabu + nmap for enterprise-friendly coverage"
@@ -605,7 +623,7 @@ run_network() {
     PORTS=$(jq -r '.ports[].port' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
     
     if [[ -n "$PORTS" ]]; then
-        run_docker "nmap -sV -sC -p $PORTS ${TARGET_DOMAIN} -oN /output/network/nmap_detailed.txt -oX /output/network/nmap_detailed.xml"
+        run_docker "nmap -sV -sC -p $PORTS ${TARGET_DOMAIN} -oN ${OUTPUT_DIR}/network/nmap_detailed.txt -oX ${OUTPUT_DIR}/network/nmap_detailed.xml"
         queue_tool_processing "nmap" "${OUTPUT_DIR}/network/nmap_detailed.xml" "network"
         log_info "Nmap scanning ports: $PORTS"
     else
