@@ -141,7 +141,7 @@ normalize_with_qwen() {
     # Call Qwen service for normalization
     if curl -s -X POST "${AI_SERVICE_URL}/normalize" \
         -H 'Content-Type: application/json' \
-        -d '$(jq -n --arg file "$input_file" \'{input_file:$file, tool_type:"vapt"}\')' \
+        -d "$payload" \
         -o "$normalized_file" 2>/dev/null; then
         
         if [[ -f "$normalized_file" ]] && [[ -s "$normalized_file" ]]; then
@@ -222,11 +222,7 @@ send_to_detectdojo() {
             
             curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
                 -H 'Content-Type: application/json' \
-                -d '$(jq -n \
-                  --arg tool "$tool_name" \
-                  --arg target "$target_domain" \
-                  --argjson output "$compact_json" \
-                  '{tool_name:$tool, target_domain:$target, tool_output:$output}')' || true
+                -d "$payload" || true
         else
             log_warn "Invalid JSON file for $tool_name: $output_file"
             return 1
@@ -267,7 +263,7 @@ send_chunked_to_detectdojo() {
             
             curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
                 -H 'Content-Type: application/json' \
-                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -Rs . <<< "${chunk_data}"), \"chunk\": \"$chunk_num\"}' || true
+                -d "{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": \"$(jq -Rs . <<< "$chunk_data")\", \"chunk\": \"$chunk_num\"}" || true
             
             ((chunk_num++))
             rm -f "$chunk_file"
@@ -611,7 +607,8 @@ run_network() {
         log_info "Nmap scanning ports: $PORTS"
     else
         log_warn "No open ports found by naabu, skipping detailed nmap"
-        touch "${OUTPUT_DIR}/network/nmap_detailed.xml"
+        echo "[]" > "${OUTPUT_DIR}/network/nmap_detailed.xml"
+        queue_tool_processing "nmap" "${OUTPUT_DIR}/network/nmap_detailed.xml" "network"
     fi
     
     log_ok "Network scanning completed"
@@ -644,8 +641,9 @@ run_vulnerability() {
     # Enhanced logic: extract technology stack from reconnaissance data
     if [[ -f "${OUTPUT_DIR}/recon/whatweb.txt" ]] || [[ -f "${OUTPUT_DIR}/network/nmap_detailed.xml" ]]; then
         # Extract technologies from whatweb and nmap results
-        TECH_STACK=$(cat "${OUTPUT_DIR}/recon/whatweb.txt" "${OUTPUT_DIR}/network/nmap_detailed.xml" 2>/dev/null | grep -iE "(apache|nginx|wordpress|joomla|drupal|tomcat|iis|php|python|node|mysql|postgresql|redis|mongodb)" | head -10 > "${OUTPUT_DIR}/vuln/tech_stack.txt" || echo "${TARGET_DOMAIN}" > "${OUTPUT_DIR}/vuln/tech_stack.txt")
-        if [[ -s "$TECH_STACK" ]]; then
+        touch "${OUTPUT_DIR}/vuln/tech_stack.txt"
+        cat "${OUTPUT_DIR}/recon/whatweb.txt" "${OUTPUT_DIR}/network/nmap_detailed.xml" 2>/dev/null | grep -iE "(apache|nginx|wordpress|joomla|drupal|tomcat|iis|php|python|node|mysql|postgresql|redis|mongodb)" | head -10 > "${OUTPUT_DIR}/vuln/tech_stack.txt"
+        if [[ -s "${OUTPUT_DIR}/vuln/tech_stack.txt" ]]; then
             log_info "Found technology stack: $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ',')"
             # Search sploitus for each technology
             for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
@@ -670,7 +668,11 @@ run_vulnerability() {
     if [[ -f "${OUTPUT_DIR}/vuln/tech_stack.txt" ]]; then
         for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
             echo "Searching exploitdb for: $tech" && searchsploit "$tech" >> /output/vuln/exploitdb.txt 2>/dev/null || true
-        done || { log_warn "ExploitDB search failed for all technologies"; echo "${TARGET_DOMAIN}" > /output/vuln/exploitdb.txt }
+        done
+        if [[ $? -ne 0 ]]; then
+            log_warn "ExploitDB search failed for all technologies"
+            echo "${TARGET_DOMAIN}" > /output/vuln/exploitdb.txt
+        fi
         else
             log_warn "No technology stack found, skipping exploitdb search"
             touch "${OUTPUT_DIR}/vuln/exploitdb.txt"
@@ -692,7 +694,7 @@ run_web() {
     
     log_info "Running gobuster for directory discovery..."
     run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/gobuster.json -q"
-    queue_tool_processing "gobuster" "${OUTPUT_DIR}/web/gobuster.txt" "web"
+    queue_tool_processing "gobuster" "${OUTPUT_DIR}/web/gobuster.json" "web"
     
     log_info "Running ffuf for fuzzing..."
     run_docker "ffuf -u https://${TARGET_DOMAIN}/FUZZ -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/ffuf.json -of json"
@@ -745,15 +747,15 @@ run_web() {
         log_info "Feeding Feroxbuster results to Katana for URL discovery..."
         
         # Extract URLs from Feroxbuster JSON and create Katana targets
-        run_docker 'jq -r ".result[] | select(.status != 403) | .url" /output/web/feroxbuster.json 2>/dev/null | sed "s|/$||" | sed "s|^/|https://${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u > /output/web/katana_targets.txt'
+        run_docker 'jq -r ".result[] | select(.status != 403) | .url" /output/web/feroxbuster.json 2>/dev/null | sed "s/|/|/g" | sed "s|^/|https://${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u > '${OUTPUT_DIR}/web/katana_targets.txt"'
         
         # Run Katana on discovered URLs from Feroxbuster
-        run_docker 'if [[ -s /output/web/katana_targets.txt ]]; then while IFS= read -r url; do echo "Katana scanning: $url" && katana -u "$url" -o /output/web/katana_$(echo "$url" | sed "s|https://||g" | sed "s|/|_|g" | sed "s|[?&=]||g" | sed "s|/$//g").txt; done < /output/web/katana_targets.txt && cat /output/web/katana_*.txt > /output/web/katana.txt 2>/dev/null || echo "No katana results" > /output/web/katana.txt; else echo "No valid targets from Feroxbuster, running Katana on base domain" && katana -u https://${TARGET_DOMAIN}/ -o /output/web/katana.txt; fi'
+        run_docker 'if [[ -s '${OUTPUT_DIR}/web/katana_targets.txt' ]]; then while IFS= read -r url; do echo "Katana scanning: $url" && katana -u "$url" -o '${OUTPUT_DIR}/web/katana_$(echo "$url" | sed "s|https://||g" | sed "s/|_|g" | sed "s|[?&=]||g" | sed "s|/$//g").txt; done < '${OUTPUT_DIR}/web/katana_targets.txt' && cat '${OUTPUT_DIR}/web/katana_*.txt > '${OUTPUT_DIR}/web/katana.txt 2>/dev/null || echo "No katana results" > '${OUTPUT_DIR}/web/katana.txt; else echo "No valid targets from Feroxbuster, running Katana on base domain" && katana -u https://${TARGET_DOMAIN} -o '${OUTPUT_DIR}/web/katana.txt; fi'
         
         # Filter live URLs with HTTPX before classification
         if [[ -f "${OUTPUT_DIR}/web/katana.txt" ]]; then
             log_info "Filtering live URLs with HTTPX..."
-            run_docker "httpx -l /output/web/katana.txt -silent -o /output/web/live_urls.txt"
+            run_docker "httpx -l '${OUTPUT_DIR}/web/katana.txt' -silent -o '${OUTPUT_DIR}/web/live_urls.txt'"
             
             total_urls=$(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0")
             live_urls=$(cat "${OUTPUT_DIR}/web/live_urls.txt" 2>/dev/null | wc -l || echo "0")
@@ -1028,7 +1030,7 @@ main() {
             run_database
             run_container
             
-            # Re-enable strict mode after background jobs complete
+            # Re-enable strict mode after all background jobs complete
             set -e
             ;;
         "modular")
