@@ -469,6 +469,7 @@ run_docker() {
         --memory="$DOCKER_MEMORY_LIMIT" \
         -v "${OUTPUT_DIR}:/output" \
         -e "TARGET_DOMAIN=$TARGET_DOMAIN" \
+        -u "$(id -u):$(id -g)" \
         "$DOCKER_IMAGE" bash -c "mkdir -p /output/{recon,network,vuln,web,ssl,database,container} && $cmd" || {
         log_error "Docker command failed: $cmd"
         return 1
@@ -542,41 +543,41 @@ run_recon() {
     log_info "Starting Phase 1: RECONNAISSANCE"
     
     log_info "Running amass for subdomain enumeration..."
-    run_docker "amass enum -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/amass.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/amass.txt" || true
+    run_docker "amass enum -d \${TARGET_DOMAIN} -o /output/recon/amass.txt 2>/dev/null || touch /output/recon/amass.txt" || true
     queue_tool_processing "amass" "${OUTPUT_DIR}/recon/amass.txt" "recon"
     
     log_info "Running subfinder for subdomain discovery..."
-    run_docker "subfinder -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/subfinder.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/subfinder.txt" || true
+    run_docker "subfinder -d \${TARGET_DOMAIN} -o /output/recon/subfinder.txt 2>/dev/null || touch /output/recon/subfinder.txt" || true
     queue_tool_processing "subfinder" "${OUTPUT_DIR}/recon/subfinder.txt" "recon"
     
     log_info "Running assetfinder for asset discovery..."
-    run_docker "assetfinder --subs-only ${TARGET_DOMAIN} > ${OUTPUT_DIR}/recon/assetfinder.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/assetfinder.txt" || true
+    run_docker "assetfinder --subs-only \${TARGET_DOMAIN} > /output/recon/assetfinder.txt 2>/dev/null || touch /output/recon/assetfinder.txt" || true
     queue_tool_processing "assetfinder" "${OUTPUT_DIR}/recon/assetfinder.txt" "recon"
     
     log_info "Running sublist3r for subdomain enumeration..."
-    run_docker "sublist3r -d ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/sublist3r.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/sublist3r.txt" || true
+    run_docker "sublist3r -d \${TARGET_DOMAIN} -o /output/recon/sublist3r.txt 2>/dev/null || touch /output/recon/sublist3r.txt" || true
     queue_tool_processing "sublist3r" "${OUTPUT_DIR}/recon/sublist3r.txt" "recon"
     
     log_info "Running DNS reconnaissance..."
     # DNS reconnaissance with timeout and fallback
-    run_docker "dig +short ${TARGET_DOMAIN} @8.8.8.8 +timeout 10 > ${OUTPUT_DIR}/recon/dig.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/dig.txt"
-    run_docker "dnsrecon -d ${TARGET_DOMAIN} -j ${OUTPUT_DIR}/recon/dnsrecon.json 2>/dev/null || echo '{}' > ${OUTPUT_DIR}/recon/dnsrecon.json"
+    run_docker "dig +short \${TARGET_DOMAIN} @8.8.8.8 +timeout 10 > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt"
+    run_docker "dnsrecon -d \${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo '{}' > /output/recon/dnsrecon.json"
     queue_tool_processing "dnsrecon" "${OUTPUT_DIR}/recon/dnsrecon.json" "recon"
     
     log_info "Running dnsx for DNS enumeration..."
-    run_docker "dnsx -d ${TARGET_DOMAIN} -a -aaaa -cname -mx -ns -txt -soa -json -o ${OUTPUT_DIR}/recon/dnsx.json 2>/dev/null || echo '[]' > ${OUTPUT_DIR}/recon/dnsx.json" || true
+    run_docker "dnsx -d \${TARGET_DOMAIN} -a -aaaa -cname -mx -ns -txt -soa -json -o /output/recon/dnsx.json 2>/dev/null || echo '[]' > /output/recon/dnsx.json" || true
     queue_tool_processing "dnsx" "${OUTPUT_DIR}/recon/dnsx.json" "recon"
     
     log_info "Running dnsenum for DNS enumeration..."
-    run_docker "dnsenum ${TARGET_DOMAIN} -o ${OUTPUT_DIR}/recon/dnsenum.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/dnsenum.txt" || true
+    run_docker "dnsenum \${TARGET_DOMAIN} -o /output/recon/dnsenum.txt 2>/dev/null || touch /output/recon/dnsenum.txt" || true
     queue_tool_processing "dnsenum" "${OUTPUT_DIR}/recon/dnsenum.txt" "recon"
     
     log_info "Running fierce for DNS enumeration..."
-    run_docker "fierce -dns ${TARGET_DOMAIN} -file ${OUTPUT_DIR}/recon/fierce.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/fierce.txt" || true
+    run_docker "fierce -dns \${TARGET_DOMAIN} -file /output/recon/fierce.txt 2>/dev/null || touch /output/recon/fierce.txt" || true
     queue_tool_processing "fierce" "${OUTPUT_DIR}/recon/fierce.txt" "recon"
     
     log_info "Running WhatWeb for technology detection..."
-    run_docker "whatweb ${TARGET_DOMAIN} > ${OUTPUT_DIR}/recon/whatweb.txt 2>/dev/null || touch ${OUTPUT_DIR}/recon/whatweb.txt"
+    run_docker "whatweb \${TARGET_DOMAIN} > /output/recon/whatweb.txt 2>/dev/null || touch /output/recon/whatweb.txt"
     queue_tool_processing "whatweb" "${OUTPUT_DIR}/recon/whatweb.txt" "recon"
     
     log_ok "Reconnaissance completed"
@@ -668,7 +669,9 @@ run_vulnerability() {
             log_info "Found technology stack: $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ',')"
             # Search sploitus for each technology
             for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
-                echo "Searching sploitus for: $tech" && sploitus -s "$tech" -o "/output/vuln/sploitus_${tech}.json" 2>/dev/null || echo "[]" > "/output/vuln/sploitus_${tech}.json"
+                # Sanitize tech name for filename
+                tech_clean=$(echo "$tech" | sed 's/[^a-zA-Z0-9_-]//g' | tr '[:upper:]' '[:lower:]')
+                echo "Searching sploitus for: $tech" && run_docker "sploitus -s '$tech' -o /output/vuln/sploitus_${tech_clean}.json 2>/dev/null || echo '[]' > /output/vuln/sploitus_${tech_clean}.json"
             done
             # Combine all sploitus results into single JSON
             jq -s 'add' /output/vuln/sploitus_*.json 2>/dev/null > "${OUTPUT_DIR}/vuln/sploitus.json" || echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"
@@ -850,7 +853,7 @@ run_database() {
         docker run --rm -v "${OUTPUT_DIR}/database:/data" "$DOCKER_IMAGE" bash -c "grep -o 'portid=\"[0-9]*\"' /data/db_ports.xml | sed 's/portid=\"//g' | sort -u | tr '\n' ',' | sed 's/,$//'" > "${OUTPUT_DIR}/database/db_ports_extracted.txt"
         DB_PORTS=$(cat "${OUTPUT_DIR}/database/db_ports_extracted.txt" 2>/dev/null || echo "")
         if [[ -n "$DB_PORTS" ]]; then
-            run_docker "nmap -sV -sC -p $DB_PORTS ${TARGET_DOMAIN} -oN /output/database/db_detailed_scan.txt -oX /output/database/db_detailed_scan.xml"
+            run_docker "nmap -sV -sC -p \$DB_PORTS \${TARGET_DOMAIN} -oN /output/database/db_detailed_scan.txt -oX /output/database/db_detailed_scan.xml"
             queue_tool_processing "database_aggregated" "${OUTPUT_DIR}/database/db_detailed_scan.xml" "database"
         else
             log_warn "No open database ports found"
