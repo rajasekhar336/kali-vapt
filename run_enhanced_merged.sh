@@ -141,7 +141,7 @@ normalize_with_qwen() {
     # Call Qwen service for normalization
     if curl -s -X POST "${AI_SERVICE_URL}/normalize" \
         -H 'Content-Type: application/json' \
-        -d '{\"input_file\": \"$input_file\", \"tool_type\": \"vapt\"}' \
+        -d '$(jq -n --arg file "$input_file" \'{input_file:$file, tool_type:"vapt"}\')' \
         -o "$normalized_file" 2>/dev/null; then
         
         if [[ -f "$normalized_file" ]] && [[ -s "$normalized_file" ]]; then
@@ -222,7 +222,11 @@ send_to_detectdojo() {
             
             curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
                 -H 'Content-Type: application/json' \
-                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -c 'if test -n \"$compact_json\" && test -n \"\"$compact_json\" && test -n \"{}\" = \"$compact_json\"; then echo \"$compact_json\"; else echo \"null\"; fi' 2>/dev/null)}' || true
+                -d '$(jq -n \
+                  --arg tool "$tool_name" \
+                  --arg target "$target_domain" \
+                  --argjson output "$compact_json" \
+                  '{tool_name:$tool, target_domain:$target, tool_output:$output}')' || true
         else
             log_warn "Invalid JSON file for $tool_name: $output_file"
             return 1
@@ -271,28 +275,7 @@ send_chunked_to_detectdojo() {
     done
     
     log_info "Sent $((chunk_num - 1)) chunks for $tool_name to DetectDojo"
-        log_info "Reassembling chunks for $tool_name..."
-        # Reassemble chunks in order
-        local reassembled_file="${OUTPUT_DIR}/reasssembled_${tool_name}.json"
-        local chunk_count=0
-        for chunk_file in "${output_file}.chunk_"*; do
-            ((chunk_count++))
-            cat "$chunk_file" >> "$reassembled_file"
-        done
-        
-        # Send reassembled file to DetectDojo
-        if [[ -f "$reassembled_file" ]] && [[ -s "$reassembled_file" ]]; then
-            log_info "Sending reassembled $tool_name results to DetectDojo"
-            curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
-                -H 'Content-Type: application/json' \
-                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -Rs . < "$reassembled_file")}' || true
-            queue_tool_processing "${tool_name}_reasssembled" "${OUTPUT_DIR}/reasssembled_${tool_name}.json" "vulnerability"
-        else
-            log_warn "Reassembly failed for $tool_name - no chunks found"
-        fi
-    else
-        log_warn "No chunks found for $tool_name reassembly"
-    fi
+}
 
 # Queue tool for batch processing
 queue_tool_processing() {
@@ -557,8 +540,9 @@ run_recon() {
     queue_tool_processing "sublist3r" "${OUTPUT_DIR}/recon/sublist3r.txt" "recon"
     
     log_info "Running DNS reconnaissance..."
-    run_docker 'dig ${TARGET_DOMAIN} ANY > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt'
-    run_docker 'dnsrecon -d ${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo "{}" > /output/recon/dnsrecon.json'
+    # DNS reconnaissance with timeout and fallback
+    run_docker "dig +short ${TARGET_DOMAIN} @8.8.8.8 +timeout 10 > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt"
+    run_docker "dnsrecon -d ${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo '{}' > /output/recon/dnsrecon.json"
     queue_tool_processing "dnsrecon" "${OUTPUT_DIR}/recon/dnsrecon.json" "recon"
     
     log_info "Running dnsx for DNS enumeration..."
@@ -619,7 +603,7 @@ run_network() {
     # ZMap removed - inappropriate for VAPT assessments (requires raw sockets, legally risky, fails in Docker)
     
     log_info "Running nmap for detailed port scanning..."
-    PORTS=$(jq -r '.[].port' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
+    PORTS=$(jq -r '.ports[].port' "${OUTPUT_DIR}/network/naabu.json" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//')
     
     if [[ -n "$PORTS" ]]; then
         run_docker "nmap -sV -sC -p $PORTS ${TARGET_DOMAIN} -oN /output/network/nmap_detailed.txt -oX /output/network/nmap_detailed.xml"
@@ -652,7 +636,7 @@ run_vulnerability() {
     queue_tool_processing "nmap_vulners" "${OUTPUT_DIR}/vuln/nmap_vulners.xml" "vulnerability"
     
     log_info "Running CVE database search for common vulnerabilities..."
-    # Search for common CVEs in web servers and frameworks
+    # Search for common CVEs in web servers and frameworks - NOTE: This is a static search for demonstration
     run_docker 'echo "CVE-2021-44228,CVE-2021-45046,CVE-2022-22965,CVE-2020-1472,CVE-2019-0708" > /output/vuln/cve_search.txt 2>/dev/null || touch /output/vuln/cve_search.txt'
     queue_tool_processing "cve-search" "${OUTPUT_DIR}/vuln/cve_search.txt" "vulnerability"
     
@@ -665,7 +649,10 @@ run_vulnerability() {
             log_info "Found technology stack: $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ',')"
             # Search sploitus for each technology
             for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
-                echo "Searching sploitus for: $tech" && sploitus -s "$tech" -o "/output/vuln/sploitus_${tech}.json" 2>/dev/null || echo "[]" > "/output/vuln/sploitus_${tech}.json"; done && jq -s "add" /output/vuln/sploitus_*.json 2>/dev/null > "${OUTPUT_DIR}/vuln/sploitus.json" || echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"' || true
+                echo "Searching sploitus for: $tech" && sploitus -s "$tech" -o "/output/vuln/sploitus_${tech}.json" 2>/dev/null || echo "[]" > "/output/vuln/sploitus_${tech}.json"
+            done
+            # Combine all sploitus results into single JSON
+            jq -s 'add' /output/vuln/sploitus_*.json 2>/dev/null > "${OUTPUT_DIR}/vuln/sploitus.json" || echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"
             queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
         else
             log_warn "No technology stack found, skipping sploitus search"
@@ -674,7 +661,7 @@ run_vulnerability() {
         fi
     else
         log_warn "Sploitus search skipped - no reconnaissance data available"
-        touch "${OUTPUT_DIR}/vuln/sploitus.json"
+        echo "[]" > "${OUTPUT_DIR}/vuln/sploitus.json"
         queue_tool_processing "sploitus" "${OUTPUT_DIR}/vuln/sploitus.json" "vulnerability"
     fi
     
@@ -682,7 +669,8 @@ run_vulnerability() {
     # Enhanced logic: use extracted technology stack for targeted searches
     if [[ -f "${OUTPUT_DIR}/vuln/tech_stack.txt" ]]; then
         for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
-            echo "Searching exploitdb for: $tech" && searchsploit "$tech" >> /output/vuln/exploitdb.txt 2>/dev/null || true; done || searchsploit ${TARGET_DOMAIN} > /output/vuln/exploitdb.txt 2>/dev/null || touch /output/vuln/exploitdb.txt' || true
+            echo "Searching exploitdb for: $tech" && searchsploit "$tech" >> /output/vuln/exploitdb.txt 2>/dev/null || true
+        done || { log_warn "ExploitDB search failed for all technologies"; echo "${TARGET_DOMAIN}" > /output/vuln/exploitdb.txt }
         else
             log_warn "No technology stack found, skipping exploitdb search"
             touch "${OUTPUT_DIR}/vuln/exploitdb.txt"
@@ -699,11 +687,11 @@ run_web() {
     log_info "Starting Phase 4: WEB SECURITY"
     
     log_info "Running feroxbuster for path discovery..."
-    run_docker "feroxbuster -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/feroxbuster.json --json"
+    run_docker "feroxbuster -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o \"${OUTPUT_DIR}/web/feroxbuster.json\" --json"
     queue_tool_processing "feroxbuster" "${OUTPUT_DIR}/web/feroxbuster.json" "web"
     
     log_info "Running gobuster for directory discovery..."
-    run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/gobuster.txt -f json"
+    run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/gobuster.json -q"
     queue_tool_processing "gobuster" "${OUTPUT_DIR}/web/gobuster.txt" "web"
     
     log_info "Running ffuf for fuzzing..."
@@ -760,7 +748,7 @@ run_web() {
         run_docker 'jq -r ".result[] | select(.status != 403) | .url" /output/web/feroxbuster.json 2>/dev/null | sed "s|/$||" | sed "s|^/|https://${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u > /output/web/katana_targets.txt'
         
         # Run Katana on discovered URLs from Feroxbuster
-        run_docker 'if [[ -s /output/web/katana_targets.txt ]]; then while IFS= read -r url; do echo "Katana scanning: $url" && katana -u "$url" -o /output/web/katana_$(echo $url | sed "s|https://||g" | sed "s|/|_|g" | sed "s|/$//").txt; done < /output/web/katana_targets.txt && cat /output/web/katana_*.txt > /output/web/katana.txt 2>/dev/null || echo "No katana results" > /output/web/katana.txt; else echo "No valid targets from Feroxbuster, running Katana on base domain" && katana -u https://${TARGET_DOMAIN}/ -o /output/web/katana.txt; fi'
+        run_docker 'if [[ -s /output/web/katana_targets.txt ]]; then while IFS= read -r url; do echo "Katana scanning: $url" && katana -u "$url" -o /output/web/katana_$(echo "$url" | sed "s|https://||g" | sed "s|/|_|g" | sed "s|[?&=]||g" | sed "s|/$//g").txt; done < /output/web/katana_targets.txt && cat /output/web/katana_*.txt > /output/web/katana.txt 2>/dev/null || echo "No katana results" > /output/web/katana.txt; else echo "No valid targets from Feroxbuster, running Katana on base domain" && katana -u https://${TARGET_DOMAIN}/ -o /output/web/katana.txt; fi'
         
         # Filter live URLs with HTTPX before classification
         if [[ -f "${OUTPUT_DIR}/web/katana.txt" ]]; then
@@ -773,7 +761,7 @@ run_web() {
         fi
         
         log_info "Feroxbuster → Katana → HTTPX pipeline completed"
-        log_info "Feroxbuster discovered: $(jq '.result | length' /output/web/feroxbuster.json 2>/dev/null || echo "0") paths"
+        log_info "Feroxbuster discovered: $(jq '.result | length' "${OUTPUT_DIR}/web/feroxbuster.json" 2>/dev/null || echo "0") paths"
         log_info "Katana crawled: $(cat /output/web/katana.txt 2>/dev/null | wc -l || echo "0") URLs"
         log_info "HTTPX verified: $(cat /output/web/live_urls.txt 2>/dev/null | wc -l || echo "0") live URLs"
     else
@@ -855,7 +843,8 @@ run_database() {
     queue_tool_processing "tnsweep" "${OUTPUT_DIR}/database/tnsweep.txt" "database"
     
     log_info "Running enum4linux for SMB enumeration..."
-    run_docker "enum4linux ${TARGET_DOMAIN} > /output/database/enum4linux.txt 2>/dev/null || touch /output/database/enum4linux.txt"
+    # enum4linux with timeout to prevent hangs
+    run_docker "timeout 300 enum4linux -a ${TARGET_DOMAIN} 2>/dev/null || touch /output/database/enum4linux.txt" || true
     queue_tool_processing "enum4linux" "${OUTPUT_DIR}/database/enum4linux.txt" "database"
     
     log_info "Running smbmap for SMB share enumeration..."
@@ -877,7 +866,8 @@ run_container() {
     log_info "Starting Phase 7: CONTAINER & CLOUD SECURITY"
     
     log_info "Checking for cloud metadata exposure..."
-    run_docker "curl -s http://169.254.169.254/latest/meta-data/ > /output/container/metadata_check.txt 2>/dev/null || echo 'No metadata exposure detected' > /output/container/metadata_check.txt"
+    # Check AWS metadata endpoint - NOTE: This only works on AWS EC2 instances
+    run_docker "curl -s --connect-timeout 5 http://169.254.169.254/latest/meta-data/ > /output/container/metadata_check.txt 2>/dev/null || echo 'No metadata exposure detected (not on AWS EC2)' > /output/container/metadata_check.txt"
     queue_tool_processing "cloud_aggregated" "${OUTPUT_DIR}/container/metadata_check.txt" "container"
     
     # Only run Kubernetes/container tools if explicitly enabled or if we have context
@@ -1026,7 +1016,10 @@ main() {
     case "$EXECUTION_MODE" in
         "strict")
             log_info "Running in STRICT mode with enhanced error handling"
-            set -euo pipefail
+            # Temporarily disable strict mode for background jobs to prevent script termination
+            set +e  # Disable 'exit on error'
+            
+            # Run phases with background job protection
             run_recon
             run_network
             run_vulnerability
@@ -1034,6 +1027,9 @@ main() {
             run_ssl
             run_database
             run_container
+            
+            # Re-enable strict mode after background jobs complete
+            set -e
             ;;
         "modular")
             log_info "Running in MODULAR mode - phases can continue independently"
