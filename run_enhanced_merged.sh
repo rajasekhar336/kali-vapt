@@ -240,9 +240,10 @@ send_to_detectdojo() {
             log_warn "Text output truncated for $tool_name (original: $(($original_size / 1024))KB, sent: $(($max_size / 1024))KB)"
         fi
         
+        local payload=$(jq -n --arg tool_name "$tool_name" --arg target_domain "$target_domain" --arg tool_output "$tool_output" '{tool_name: $tool_name, target_domain: $target_domain, tool_output: $tool_output}')
         curl -s -X POST "${DETECTDOJO_URL}/api/findings/add" \
             -H 'Content-Type: application/json' \
-            -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -Rs . <<< "${tool_output}")}' || true
+            -d "$payload" || true
     fi
 }
 
@@ -345,8 +346,8 @@ classify_and_route_urls() {
         while read -r url; do
             # Run SQLMap in background with error handling
             if [[ "$EXECUTION_MODE" == "strict" ]]; then
-                # In strict mode, capture errors to prevent script termination
-                (run_docker "sqlmap -u \"$url\" --batch --random-agent --output-dir=\"/output/web/sqlmap_$(echo $url | sed 's|https://||;s|/|_|g')\" 2>/dev/null || true && echo \"SQLMap completed: $url\" >> \"${OUTPUT_DIR}/web/sqlmap_success.log\" || echo \"SQLMap failed: $url\" >> \"${OUTPUT_DIR}/web/sqlmap_errors.log\") &
+                # In strict mode, run SQLMap with error capture
+                (run_docker "sqlmap -u \"$url\" --batch --random-agent --output-dir=\"/output/web/sqlmap_$(echo $url | sed 's|https://||;s|/|_|g')\" 2>\"/dev/null\" || echo \"SQLMap completed: $url\"") &
                 pids+=($!)
             else
                 # Non-strict mode can use simpler approach
@@ -749,10 +750,10 @@ run_web() {
         log_info "Feeding Feroxbuster results to Katana for URL discovery..."
         
         # Extract URLs from Feroxbuster JSON and create Katana targets
-        run_docker 'jq -r ".result[] | select(.status != 403) | .url" /output/web/feroxbuster.json 2>/dev/null | sed "s/|/|/g" | sed "s|^/|https://${TARGET_DOMAIN}/|" | sed "s|[^/]$|&/|" | sort -u > '${OUTPUT_DIR}/web/katana_targets.txt"'
+        run_docker 'jq -r ".result[] | select(.status != 403) | .url" /output/web/feroxbuster.json 2>/dev/null | sort -u > /output/web/katana_targets.txt'
         
         # Run Katana on discovered URLs from Feroxbuster
-        run_docker 'if [[ -s '${OUTPUT_DIR}/web/katana_targets.txt' ]]; then while IFS= read -r url; do echo "Katana scanning: $url" && katana -u "$url" -o '${OUTPUT_DIR}/web/katana_$(echo "$url" | sed "s|https://||g" | sed "s/|_|g" | sed "s|[?&=]||g" | sed "s|/$//g").txt; done < '${OUTPUT_DIR}/web/katana_targets.txt' && cat '${OUTPUT_DIR}/web/katana_*.txt > '${OUTPUT_DIR}/web/katana.txt 2>/dev/null || echo "No katana results" > '${OUTPUT_DIR}/web/katana.txt; else echo "No valid targets from Feroxbuster, running Katana on base domain" && katana -u https://${TARGET_DOMAIN} -o '${OUTPUT_DIR}/web/katana.txt; fi'
+        run_docker 'if [[ -s /output/web/katana_targets.txt ]]; then while IFS= read -r url; do katana -u "$url" -o /output/web/katana.txt 2>/dev/null || true; done < /output/web/katana_targets.txt; else katana -u https://'${TARGET_DOMAIN}' -o /output/web/katana.txt 2>/dev/null || touch /output/web/katana.txt; fi'
         
         # Filter live URLs with HTTPX before classification
         if [[ -f "${OUTPUT_DIR}/web/katana.txt" ]]; then
