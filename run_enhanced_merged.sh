@@ -20,7 +20,7 @@ DRY_RUN=false
 EXECUTION_MODE='strict'  # strict, modular, unified
 DOCKER_IMAGE='rajatherise/kali-vapt-image:latest'
 OUTPUT_DIR='/var/log/output'
-LOG_FILE='/var/production/logs/execution.log'
+LOG_FILE=''
 ZAP_DOCKER_IMAGE='ghcr.io/zaproxy/zaproxy:stable'
 ZAP_TIMEOUT_MINUTES=30
 MAX_PARALLEL_SCANS=1
@@ -513,6 +513,9 @@ init_directories() {
     # Update OUTPUT_DIR to point to timestamped directory
     OUTPUT_DIR="${scan_dir}"
     
+    # Set LOG_FILE to use the timestamped directory
+    LOG_FILE="${OUTPUT_DIR}/execution.log"
+    
     # Create subdirectories
     mkdir -p "${OUTPUT_DIR}"/{recon,network,web,ssl,database,container,vuln} || {
         log_error "Failed to create output directories"
@@ -691,7 +694,7 @@ run_vulnerability() {
     # Enhanced logic: use extracted technology stack for targeted searches
     if [[ -f "${OUTPUT_DIR}/vuln/tech_stack.txt" ]]; then
         for tech in $(cat "${OUTPUT_DIR}/vuln/tech_stack.txt" 2>/dev/null | tr '\n' ' '); do
-            echo "Searching exploitdb for: $tech" && searchsploit "$tech" >> /output/vuln/exploitdb.txt 2>/dev/null || true
+            echo "Searching exploitdb for: $tech" && run_docker "searchsploit '$tech' >> /output/vuln/exploitdb.txt 2>/dev/null || true"
         done
         if [[ $? -ne 0 ]]; then
             log_warn "ExploitDB search failed for all technologies"
@@ -713,55 +716,55 @@ run_web() {
     log_info "Starting Phase 4: WEB SECURITY"
     
     log_info "Running feroxbuster for path discovery..."
-    run_docker "feroxbuster -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o \"${OUTPUT_DIR}/web/feroxbuster.json\" --json"
+    run_docker "feroxbuster -u https://\\${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/feroxbuster.json --json"
     queue_tool_processing "feroxbuster" "${OUTPUT_DIR}/web/feroxbuster.json" "web"
     
     log_info "Running gobuster for directory discovery..."
-    run_docker "gobuster dir -u https://${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/gobuster.json -q"
+    run_docker "gobuster dir -u https://\${TARGET_DOMAIN} -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/gobuster.json -q"
     queue_tool_processing "gobuster" "${OUTPUT_DIR}/web/gobuster.json" "web"
     
     log_info "Running ffuf for fuzzing..."
-    run_docker "ffuf -u https://${TARGET_DOMAIN}/FUZZ -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/ffuf.json -of json"
+    run_docker "ffuf -u https://\${TARGET_DOMAIN}/FUZZ -w /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/ffuf.json -of json"
     queue_tool_processing "ffuf" "${OUTPUT_DIR}/web/ffuf.json" "web"
     
     log_info "Running dirsearch for directory discovery..."
-    run_docker "dirsearch -u https://${TARGET_DOMAIN} -o /output/web/dirsearch.json --json-output"
+    run_docker "dirsearch -u https://\\${TARGET_DOMAIN} -o /output/web/dirsearch.json --json-output"
     queue_tool_processing "dirsearch" "${OUTPUT_DIR}/web/dirsearch.json" "web"
     
     log_info "Running dirb for directory discovery..."
-    run_docker "dirb https://${TARGET_DOMAIN} /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/dirb.txt 2>/dev/null || touch /output/web/dirb.txt"
+    run_docker "dirb https://\${TARGET_DOMAIN} /opt/wordlists/SecLists/Discovery/Web-Content/common.txt -o /output/web/dirb.txt 2>/dev/null || touch /output/web/dirb.txt"
     queue_tool_processing "dirb" "${OUTPUT_DIR}/web/dirb.txt" "web"
     
     # dirbuster removed - Java GUI tool not suitable for headless Docker execution
     
     log_info "Running hakrawler for URL discovery..."
-    run_docker "echo https://${TARGET_DOMAIN} | hakrawler -d 5 -o /output/web/hakrawler.txt 2>/dev/null || touch /output/web/hakrawler.txt"
+    run_docker "echo https://\${TARGET_DOMAIN} | hakrawler -d 5 -o /output/web/hakrawler.txt 2>/dev/null || touch /output/web/hakrawler.txt"
     queue_tool_processing "hakrawler" "${OUTPUT_DIR}/web/hakrawler.txt" "web"
     
     log_info "Running gospider for URL discovery..."
-    run_docker "gospider -s https://${TARGET_DOMAIN} -o /output/web/gospider -d 2 2>/dev/null || touch /output/web/gospider/urls.txt"
+    run_docker 'gospider -s https://${TARGET_DOMAIN} -o /output/web/gospider -d 2 2>/dev/null || touch /output/web/gospider/urls.txt'
     queue_tool_processing "gospider" "${OUTPUT_DIR}/web/gospider/urls.txt" "web"
     
     log_info "Running wpscan for WordPress security..."
-    run_docker "wpscan --url https://${TARGET_DOMAIN} --format json -o /output/web/wpscan.json 2>/dev/null || echo '{}' > /output/web/wpscan.json"
+    run_docker "wpscan --url https://\${TARGET_DOMAIN} --format json -o /output/web/wpscan.json 2>/dev/null || echo '{}' > /output/web/wpscan.json"
     queue_tool_processing "wpscan" "${OUTPUT_DIR}/web/wpscan.json" "web"
     
     log_info "Running joomscan for Joomla security..."
-    run_docker "joomscan -u https://${TARGET_DOMAIN} -o /output/web/joomscan.txt 2>/dev/null || touch /output/web/joomscan.txt"
+    run_docker "joomscan -u https://\${TARGET_DOMAIN} -o /output/web/joomscan.txt 2>/dev/null || touch /output/web/joomscan.txt"
     queue_tool_processing "joomscan" "${OUTPUT_DIR}/web/joomscan.txt" "web"
     
     log_info "Running droopescan for Drupal security..."
-    run_docker "droopescan scan https://${TARGET_DOMAIN} -o /output/web/droopescan.json 2>/dev/null || echo '{}' > /output/web/droopescan.json"
+    run_docker "droopescan scan https://\${TARGET_DOMAIN} -o /output/web/droopescan.json 2>/dev/null || echo '{}' > /output/web/droopescan.json"
     queue_tool_processing "droopescan" "${OUTPUT_DIR}/web/droopescan.json" "web"
     
     log_info "Running skipfish for web scanning..."
-    run_docker "skipfish -o /output/web/skipfish https://${TARGET_DOMAIN} 2>/dev/null || touch /output/web/skipfish/index.html"
+    run_docker 'skipfish -o /output/web/skipfish https://${TARGET_DOMAIN} 2>/dev/null || touch /output/web/skipfish/index.html'
     queue_tool_processing "skipfish" "${OUTPUT_DIR}/web/skipfish/index.html" "web"
     
     # uniscan removed - often broken and deprecated tool
     
     log_info "Running aquatone for screenshot capture..."
-    run_docker "aquatone -d ${TARGET_DOMAIN} -o /output/web/aquatone 2>/dev/null || touch /output/web/aquatone/aquatone.json"
+    run_docker 'aquatone -d ${TARGET_DOMAIN} -o /output/web/aquatone 2>/dev/null || touch /output/web/aquatone/aquatone.json'
     queue_tool_processing "aquatone" "${OUTPUT_DIR}/web/aquatone/aquatone.json" "web"
     
     # eyeballer removed - complex ML dependencies not suitable for standard Docker images
@@ -826,11 +829,11 @@ run_ssl() {
     log_info "Starting Phase 5: SSL/TLS ASSESSMENT"
     
     log_info "Running sslyze for SSL/TLS testing..."
-    run_docker "sslyze --json_out=/output/ssl/sslyze.json --regular ${TARGET_DOMAIN}:443"
+    run_docker 'sslyze --json_out=/output/ssl/sslyze.json --regular ${TARGET_DOMAIN}:443'
     queue_tool_processing "sslyze" "${OUTPUT_DIR}/ssl/sslyze.json" "ssl"
     
     log_info "Running testssl for SSL/TLS testing..."
-    run_docker "/opt/tools/testssl/testssl.sh --jsonfile /output/ssl/testssl.json ${TARGET_DOMAIN}:443 2>/dev/null || echo '{\"error\": \"testssl.sh dependency issue\", \"alternative\": \"sslyze completed successfully\"}' > /output/ssl/testssl.json"
+    run_docker '/opt/tools/testssl/testssl.sh --jsonfile /output/ssl/testssl.json ${TARGET_DOMAIN}:443 2>/dev/null || echo '\''{"error": "testssl.sh dependency issue", "alternative": "sslyze completed successfully"}'\'' > /output/ssl/testssl.json'
     queue_tool_processing "testssl" "${OUTPUT_DIR}/ssl/testssl.json" "ssl"
     
     log_ok "SSL/TLS assessment completed"
@@ -844,7 +847,7 @@ run_database() {
     log_info "Starting Phase 6: DATABASE SCANNING"
     
     log_info "Running database port checks..."
-    run_docker "nmap -p 1433,3306,5432,5984,6379,27017,1521,27017,27018,27019 ${TARGET_DOMAIN} -oN /output/database/db_ports.txt -oX /output/database/db_ports.xml"
+    run_docker "nmap -p 1433,3306,5432,5984,6379,27017,1521,27017,27018,27019 \${TARGET_DOMAIN} -oN /output/database/db_ports.txt -oX /output/database/db_ports.xml"
     queue_tool_processing "db_detailed_scan" "${OUTPUT_DIR}/database/db_ports.xml" "database"
     
     log_info "Running detailed database scans on open ports..."
@@ -853,7 +856,7 @@ run_database() {
         docker run --rm -v "${OUTPUT_DIR}/database:/data" "$DOCKER_IMAGE" bash -c "grep -o 'portid=\"[0-9]*\"' /data/db_ports.xml | sed 's/portid=\"//g' | sort -u | tr '\n' ',' | sed 's/,$//'" > "${OUTPUT_DIR}/database/db_ports_extracted.txt"
         DB_PORTS=$(cat "${OUTPUT_DIR}/database/db_ports_extracted.txt" 2>/dev/null || echo "")
         if [[ -n "$DB_PORTS" ]]; then
-            run_docker "nmap -sV -sC -p \$DB_PORTS \${TARGET_DOMAIN} -oN /output/database/db_detailed_scan.txt -oX /output/database/db_detailed_scan.xml"
+            run_docker "nmap -sV -sC -p $DB_PORTS \${TARGET_DOMAIN} -oN /output/database/db_detailed_scan.txt -oX /output/database/db_detailed_scan.xml"
             queue_tool_processing "database_aggregated" "${OUTPUT_DIR}/database/db_detailed_scan.xml" "database"
         else
             log_warn "No open database ports found"
@@ -865,20 +868,20 @@ run_database() {
     fi
     
     log_info "Running tnsweep for Oracle database scanning..."
-    run_docker "tnsweep ${TARGET_DOMAIN} -o /output/database/tnsweep.txt 2>/dev/null || touch /output/database/tnsweep.txt"
+    run_docker "tnsweep \${TARGET_DOMAIN} -o /output/database/tnsweep.txt 2>/dev/null || touch /output/database/tnsweep.txt"
     queue_tool_processing "tnsweep" "${OUTPUT_DIR}/database/tnsweep.txt" "database"
     
     log_info "Running enum4linux for SMB enumeration..."
     # enum4linux with timeout to prevent hangs
-    run_docker "timeout 300 enum4linux -a ${TARGET_DOMAIN} 2>/dev/null || touch /output/database/enum4linux.txt" || true
+    run_docker "timeout 300 enum4linux -a \${TARGET_DOMAIN} 2>/dev/null || touch /output/database/enum4linux.txt" || true
     queue_tool_processing "enum4linux" "${OUTPUT_DIR}/database/enum4linux.txt" "database"
     
     log_info "Running smbmap for SMB share enumeration..."
-    run_docker "smbmap -H ${TARGET_DOMAIN} > /output/database/smbmap.txt 2>/dev/null || touch /output/database/smbmap.txt"
+    run_docker "smbmap -H \${TARGET_DOMAIN} > /output/database/smbmap.txt 2>/dev/null || touch /output/database/smbmap.txt"
     queue_tool_processing "smbmap" "${OUTPUT_DIR}/database/smbmap.txt" "database"
     
     log_info "Running rpcclient for RPC enumeration..."
-    run_docker "rpcclient -U '' -N ${TARGET_DOMAIN} -c 'srvinfo' > /output/database/rpcclient.txt 2>/dev/null || touch /output/database/rpcclient.txt"
+    run_docker "rpcclient -U '' -N \${TARGET_DOMAIN} -c 'srvinfo' > /output/database/rpcclient.txt 2>/dev/null || touch /output/database/rpcclient.txt"
     queue_tool_processing "rpcclient" "${OUTPUT_DIR}/database/rpcclient.txt" "database"
     
     log_ok "Database scanning completed"
