@@ -164,15 +164,13 @@ send_to_detectdojo() {
         compact_json=$(jq -c . "$output_file" 2>/dev/null)
         if [[ $? -eq 0 ]]; then
             log_info "Sending JSON to DetectDojo: $tool_name -> $compact_json"
-            # Create a temporary JSON file for the payload
-            local payload_file="/tmp/detectdojo_payload_$$.json"
-            echo "{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": \"$compact_json\"}" > "$payload_file"
-            docker exec detectdojo-server sh -c "curl -s -X POST http://localhost:8081/api/findings/add -H 'Content-Type: application/json' -d @/tmp/detectdojo_payload_$$" || {
+            # Create payload inline to avoid file issues
+            docker exec detectdojo-server sh -c "curl -s -X POST http://localhost:8081/api/findings/add \
+                -H 'Content-Type: application/json' \
+                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": \"$compact_json\"}'" || {
                 log_warn "Failed to send JSON results for $tool_name to DetectDojo"
-                rm -f "$payload_file" 2>/dev/null
                 return 0
             }
-            rm -f "$payload_file" 2>/dev/null
         else
             log_warn "Invalid JSON file for $tool_name: $output_file"
             return 1
@@ -314,14 +312,25 @@ classify_and_route_urls() {
         log_info "No WordPress detected, skipping wpscan"
     fi
     
-    # FFUF parameter fuzzing on parameterized URLs
+    # FFUF parameter fuzzing on parameterized URLs (using gf patterns)
     if [[ -s "${OUTPUT_DIR}/web/parameterized_urls.txt" ]]; then
-        log_info "Running FFUF parameter fuzzing on parameterized URLs..."
-        local MAX_JOBS=2
+        log_info "Running FFUF parameter fuzzing with gf patterns..."
+        
+        # Extract vulnerable patterns with gf
+        run_docker "cat /output/web/parameterized_urls.txt | gf xss | head -20 > /output/web/xss_patterns.txt"
+        run_docker "cat /output/web/parameterized_urls.txt | gf sqli | head -20 > /output/web/sqli_patterns.txt"
+        
+        # Use qsreplace for payload injection testing
+        if [[ -s "/output/web/xss_patterns.txt" ]]; then
+            run_docker "qsreplace -a /opt/SecLists/Fuzzing/XSS.txt -s < /output/web/xss_patterns.txt > /output/web/xss_payloads.txt"
+        fi
+        
+        local MAX_JOBS=3
         local job_count=0
         
         while read -r url; do
-            run_docker "ffuf -w /opt/SecLists/Fuzzing/ParamDiscovery.txt -u \"$url\" -o /output/web/ffuf_params_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').json -of json 2>/dev/null || true" &
+            # FFUF parameter fuzzing with GET/POST
+            run_docker "ffuf -w /opt/SecLists/Fuzzing/ParamDiscovery.txt -u \"$url\" -X GET,POST -o /output/web/ffuf_params_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').json -of json 2>/dev/null || true" &
             ((job_count++))
             
             if [[ $job_count -ge $MAX_JOBS ]]; then
@@ -361,26 +370,6 @@ classify_and_route_urls() {
     
     # ZAP on high-value HTML pages (limited set) - WITH NORMALIZATION
     head -10 "${OUTPUT_DIR}/web/html_pages.txt" > "${OUTPUT_DIR}/web/zap_targets.txt" 2>/dev/null || true
-    
-    if [[ -s "${OUTPUT_DIR}/web/zap_targets.txt" ]]; then
-        log_info "Running ZAP on high-value HTML pages..."
-        while read -r url; do
-            log_info "Running ZAP baseline scan on $url"
-            docker run --rm \
-                -v "${OUTPUT_DIR}/web:/zap/wrk" \
-                "$ZAP_DOCKER_IMAGE" zap-baseline.py \
-                -t "$url" \
-                -J "zap_$(echo $url | sed 's|https://||;s|/|_|g').json" \
-                -m $ZAP_TIMEOUT_MINUTES || true
-        done < "${OUTPUT_DIR}/web/zap_targets.txt"
-        if [[ -f "$zap_file" ]]; then
-            queue_tool_processing "zap" "$zap_file" "web"
-        fi
-    done
-    
-    log_info "Web results queued for DetectDojo batch processing"
-    
-    log_ok "Web security assessment completed"
     
     # Process batch results for this phase
     process_batch_results "web"
@@ -598,13 +587,13 @@ run_web() {
     # Dirsearch
     run_docker "python3 /opt/dirsearch/dirsearch.py -u https://${TARGET_DOMAIN} -o /output/web/dirsearch.json --json-output 2>/dev/null || echo 'No dirsearch results' > /output/web/dirsearch.json"
     
-    # FFUF (dir mode)
-    run_docker "ffuf -w /opt/SecLists/Discovery/Web-Content/common.txt -u https://${TARGET_DOMAIN} -o /output/web/ffuf.txt -of json 2>/dev/null || echo 'No ffuf results' > /output/web/ffuf.txt"
+    # FFUF (directory fuzzing mode)
+    run_docker "ffuf -w /opt/SecLists/Discovery/Web-Content/common.txt -u https://${TARGET_DOMAIN} -o /output/web/ffuf_dir.txt -of json 2>/dev/null || echo 'No ffuf results' > /output/web/ffuf_dir.txt"
     
-    # Step 4: Merge and deduplicate all discovery results
-    log_info "Step 4: Merging discovery results..."
+    # Step 4: Merge and deduplicate ALL discovery results
+    log_info "Step 4: Merging ALL discovery results with pipeline glue tools..."
     
-    # Extract URLs from all tools and merge
+    # Use uro for URL deduplication
     {
         # From feroxbuster
         [[ -f "/output/web/feroxbuster.json" ]] && jq -r '.result[] | select(.status != 403) | .url' /output/web/feroxbuster.json 2>/dev/null || echo ""
@@ -612,12 +601,12 @@ run_web() {
         # From dirsearch
         [[ -f "/output/web/dirsearch.json" ]] && jq -r '.results[] | .target' /output/web/dirsearch.json 2>/dev/null || echo ""
         
-        # From ffuf
-        [[ -f "/output/web/ffuf.txt" ]] && jq -r '.results[] | .url' /output/web/ffuf.txt 2>/dev/null || echo ""
-    } | sort -u > /output/web/all_discovered_urls.txt
+        # From ffuf (directory mode)
+        [[ -f "/output/web/ffuf_dir.txt" ]] && jq -r '.results[] | .url' /output/web/ffuf_dir.txt 2>/dev/null || echo ""
+    } | uro -o /output/web/all_discovered_urls.txt
     
     discovered_count=$(cat /output/web/all_discovered_urls.txt 2>/dev/null | wc -l || echo "0")
-    log_info "Total discovered URLs: $discovered_count"
+    log_info "Total discovered URLs after deduplication: $discovered_count"
     
     # Step 5: Katana crawling on merged URLs
     if [[ -f "/output/web/all_discovered_urls.txt" ]] && [[ -s "/output/web/all_discovered_urls.txt" ]]; then
