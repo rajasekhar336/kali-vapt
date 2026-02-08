@@ -2,7 +2,7 @@ FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV GO111MODULE=on
-ENV PATH="/root/go/bin:${PATH}"
+ENV PATH="/root/go/bin:/root/.local/bin:${PATH}"
 
 # -----------------------------
 # System + Dev Dependencies

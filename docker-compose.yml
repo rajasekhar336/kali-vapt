@@ -1,29 +1,6 @@
 version: '3.8'
 
 services:
-  kalivapt:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: kalivapt
-    restart: unless-stopped
-    environment:
-      - TARGET_DOMAIN=example.com
-      - AI_SERVICE_URL=http://127.0.0.1:8080
-      - DETECTDOJO_URL=http://127.0.0.1:8081
-    volumes:
-      - ./run_enhanced.sh:/opt/run_enhanced.sh
-      - ./logs:/var/log/output
-      # Mounting the Docker socket gives the container root access to the host Docker
-      # engine and is a major privilege escalation risk. Enable only if strictly required.
-      # - /var/run/docker.sock:/var/run/docker.sock
-    command: tail -f /dev/null
-    networks:
-      - vapt-network
-    depends_on:
-      - qwen-0.5b-normalizer
-      - detectdojo
-
   qwen-0.5b-normalizer:
     build:
       context: ./qwen-0.5b-normalizer
@@ -75,6 +52,27 @@ services:
       retries: 3
     networks:
       - vapt-network
+
+  kali-vapt:
+    build:
+      context: ./kali-docker
+      dockerfile: Dockerfile
+    image: rajatherise/kali-penvapt:latest
+    container_name: kali-vapt-scanner
+    restart: unless-stopped
+    environment:
+      - TARGET_DOMAIN=example.com
+      - AI_SERVICE_URL=http://qwen-0.5b-normalizer:8080
+      - DETECTDOJO_URL=http://detectdojo:8081
+    volumes:
+      - ./run_enhanced_merged.sh:/opt/run_enhanced_merged.sh
+      - /var/log/output:/var/log/output
+    command: tail -f /dev/null
+    networks:
+      - vapt-network
+    depends_on:
+      - qwen-0.5b-normalizer
+      - detectdojo
 
 # Example Ollama service (optional). Recommended to run Ollama separately from the normalizer:
 # ollama:
