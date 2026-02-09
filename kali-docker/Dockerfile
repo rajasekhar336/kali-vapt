@@ -21,6 +21,10 @@ RUN apt-get update && apt-get install -y \
     nikto \
     whatweb \
     dnsutils \
+    dnsrecon \
+    amass \
+    wpscan \
+    feroxbuster \
     net-tools \
     ca-certificates \
     && apt-get clean \
@@ -31,7 +35,10 @@ RUN apt-get update && apt-get install -y python3-pip python3-venv pipx && \
     pipx install wafw00f && \
     pipx install uro && \
     pipx install arjun && \
-    pipx install xsrfprobe
+    pipx install xsrfprobe && \
+    pipx install sqlmap && \
+    pipx install httprobe && \
+    pipx install sslyze
 
 # -----------------------------
 # Install Go Tools (Latest)
@@ -45,6 +52,9 @@ RUN go install github.com/lc/gau/v2/cmd/gau@latest
 RUN go install github.com/tomnomnom/waybackurls@latest
 RUN go install github.com/tomnomnom/assetfinder@latest
 RUN go install github.com/ffuf/ffuf@latest
+RUN go install github.com/tomnomnom/gf@latest
+RUN go install github.com/tomnomnom/qsreplace@latest
+RUN go install github.com/hahwul/dalfox/v2@latest
 
 # -----------------------------
 # Dirsearch

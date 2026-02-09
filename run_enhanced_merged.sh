@@ -164,10 +164,12 @@ send_to_detectdojo() {
         compact_json=$(jq -c . "$output_file" 2>/dev/null)
         if [[ $? -eq 0 ]]; then
             log_info "Sending JSON to DetectDojo: $tool_name -> $compact_json"
-            # Create payload inline to avoid file issues
+            # Use printf to properly escape JSON
+            local json_payload
+            json_payload=$(printf '{"tool_name": "%s", "target_domain": "%s", "tool_output": "%s"}' "$tool_name" "$target_domain" "$compact_json")
             docker exec detectdojo-server sh -c "curl -s -X POST http://localhost:8081/api/findings/add \
                 -H 'Content-Type: application/json' \
-                -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": \"$compact_json\"}'" || {
+                -d '$json_payload'" || {
                 log_warn "Failed to send JSON results for $tool_name to DetectDojo"
                 return 0
             }
