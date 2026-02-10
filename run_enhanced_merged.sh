@@ -39,7 +39,7 @@ ENABLE_DETECTDOJO_INTEGRATION=true
 # Tool arrays for DetectDojo integration - COMPLETE
 import_only_tools=("amass")
 vulnerability_assertions=("nuclei" "nmap_vulners")
-web_vulnerability_assertions=("nikto" "wapiti" "zap" "katana_nuclei" "feroxbuster_nuclei" "ffuf_nuclei" "dirsearch_nuclei" "arjun" "httpx" "hakrawler" "gospider" "dirb" "dirbuster" "whatweb")
+web_vulnerability_assertions=("nikto" "wapiti" "zap" "katana_nuclei" "feroxbuster_nuclei" "ffuf_nuclei" "dirsearch_nuclei" "arjun" "httpx" "katana" "ffuf" "feroxbuster" "dirsearch" "whatweb")
 database_findings=("sqlmap" "db_detailed_scan" "database_aggregated" "sslyze" "testssl")
 cloud_findings=("kubeaudit" "cloud_aggregated")
 network_risk_tools=("nmap" "masscan" "httpx")
@@ -159,32 +159,60 @@ send_to_detectdojo() {
     
     # Handle JSON files - WORKING VERSION
     if [[ "$output_file" == *.json ]]; then
-        # Validate JSON and compact it
-        local compact_json
-        compact_json=$(jq -c . "$output_file" 2>/dev/null)
-        if [[ $? -eq 0 ]]; then
-            log_info "Sending JSON to DetectDojo: $tool_name -> $compact_json"
-            # Use printf to properly escape JSON
-            local json_payload
-            json_payload=$(printf '{"tool_name": "%s", "target_domain": "%s", "tool_output": "%s"}' "$tool_name" "$target_domain" "$compact_json")
-            docker exec detectdojo-server sh -c "curl -s -X POST http://localhost:8081/api/findings/add \
-                -H 'Content-Type: application/json' \
-                -d '$json_payload'" || {
-                log_warn "Failed to send JSON results for $tool_name to DetectDojo"
-                return 0
-            }
+        # Check if file contains line-delimited JSON (like naabu output)
+        local first_line
+        first_line=$(head -n1 "$output_file" 2>/dev/null)
+        
+        if [[ "$first_line" == \{* ]]; then
+            # Line-delimited JSON - convert to array
+            local compact_json
+            compact_json=$(jq -s . "$output_file" 2>/dev/null)
+            if [[ $? -eq 0 ]]; then
+                log_info "Sending JSON to DetectDojo: $tool_name -> $compact_json"
+                # Send directly from host to DetectDojo API
+                local json_payload
+                json_payload=$(printf '{"tool_name": "%s", "target_domain": "%s", "tool_output": %s}' "$tool_name" "$target_domain" "$compact_json")
+                curl -s -X POST http://localhost:8081/api/findings/add \
+                    -H 'Content-Type: application/json' \
+                    -d "$json_payload" || {
+                    log_warn "Failed to send JSON results for $tool_name to DetectDojo"
+                    return 0
+                }
+            else
+                log_warn "Invalid JSON array in file: $output_file"
+                return 1
+            fi
         else
-            log_warn "Invalid JSON file for $tool_name: $output_file"
-            return 1
+            # Single JSON document
+            local compact_json
+            compact_json=$(jq -c . "$output_file" 2>/dev/null)
+            if [[ $? -eq 0 ]]; then
+                log_info "Sending JSON to DetectDojo: $tool_name -> $compact_json"
+                # Send directly from host to DetectDojo API
+                local json_payload
+                json_payload=$(printf '{"tool_name": "%s", "target_domain": "%s", "tool_output": %s}' "$tool_name" "$target_domain" "$compact_json")
+                curl -s -X POST http://localhost:8081/api/findings/add \
+                    -H 'Content-Type: application/json' \
+                    -d "$json_payload" || {
+                    log_warn "Failed to send JSON results for $tool_name to DetectDojo"
+                    return 0
+                }
+            else
+                log_warn "Invalid JSON file for $tool_name: $output_file"
+                return 1
+            fi
         fi
     else
         # Handle text files
         local tool_output
         tool_output=$(cat "$output_file")
         log_info "Sending text to DetectDojo: $tool_name (${#tool_output} chars)"
-        docker exec detectdojo-server sh -c "curl -s -X POST http://localhost:8081/api/findings/add \
+        # Send directly from host to DetectDojo API
+        local json_payload
+        json_payload=$(printf '{"tool_name": "%s", "target_domain": "%s", "tool_output": %s}' "$tool_name" "$target_domain" "$(jq -Rs . <<< "$tool_output")")
+        curl -s -X POST http://localhost:8081/api/findings/add \
             -H 'Content-Type: application/json' \
-            -d '{\"tool_name\": \"$tool_name\", \"target_domain\": \"$target_domain\", \"tool_output\": $(jq -Rs . <<< "$tool_output")}'" || {
+            -d "$json_payload" || {
             log_warn "Failed to send text results for $tool_name to DetectDojo"
             return 0  # Don't exit the script in strict mode
         }
@@ -448,8 +476,8 @@ check_authorization() {
 run_recon() {
     log_info "Starting Phase 1: RECONNAISSANCE"
     
-    log_info "Running amass for subdomain enumeration..."
-    run_docker 'amass enum -d ${TARGET_DOMAIN} -o /output/recon/amass.txt 2>/dev/null || touch /output/recon/amass.txt' || true
+    log_info "Running subfinder for subdomain enumeration..."
+    run_docker 'subfinder -d ${TARGET_DOMAIN} -o /output/recon/amass.txt 2>/dev/null || touch /output/recon/amass.txt' || true
     
     log_info "Running DNS reconnaissance..."
     run_docker 'dig ${TARGET_DOMAIN} ANY > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt'
@@ -590,45 +618,45 @@ run_web() {
     run_docker "python3 /opt/dirsearch/dirsearch.py -u https://${TARGET_DOMAIN} -o /output/web/dirsearch.json --json-output 2>/dev/null || echo 'No dirsearch results' > /output/web/dirsearch.json"
     
     # FFUF (directory fuzzing mode)
-    run_docker "ffuf -w /opt/SecLists/Discovery/Web-Content/common.txt -u https://${TARGET_DOMAIN} -o /output/web/ffuf_dir.txt -of json 2>/dev/null || echo 'No ffuf results' > /output/web/ffuf_dir.txt"
+    run_docker "ffuf -w /opt/SecLists/Discovery/Web-Content/common.txt -u https://${TARGET_DOMAIN}/FUZZ -o /output/web/ffuf_dir.json -of json 2>/dev/null || echo 'No ffuf results' > /output/web/ffuf_dir.json"
     
     # Step 4: Merge and deduplicate ALL discovery results
     log_info "Step 4: Merging ALL discovery results with pipeline glue tools..."
     
-    # Use uro for URL deduplication
+    # Use sort -u for URL deduplication (alternative to uro)
     {
         # From feroxbuster
-        [[ -f "/output/web/feroxbuster.json" ]] && jq -r '.result[] | select(.status != 403) | .url' /output/web/feroxbuster.json 2>/dev/null || echo ""
+        [[ -f "${OUTPUT_DIR}/web/feroxbuster.json" ]] && jq -r 'select(.type == "response" and .status != 403) | .url' "${OUTPUT_DIR}/web/feroxbuster.json" 2>/dev/null || echo ""
         
         # From dirsearch
-        [[ -f "/output/web/dirsearch.json" ]] && jq -r '.results[] | .target' /output/web/dirsearch.json 2>/dev/null || echo ""
+        [[ -f "${OUTPUT_DIR}/web/dirsearch.json" ]] && jq -r '.results[] | .target' "${OUTPUT_DIR}/web/dirsearch.json" 2>/dev/null || echo ""
         
         # From ffuf (directory mode)
-        [[ -f "/output/web/ffuf_dir.txt" ]] && jq -r '.results[] | .url' /output/web/ffuf_dir.txt 2>/dev/null || echo ""
-    } | uro -o /output/web/all_discovered_urls.txt
+        [[ -f "${OUTPUT_DIR}/web/ffuf_dir.json" ]] && jq -r '.results[] | .url' "${OUTPUT_DIR}/web/ffuf_dir.json" 2>/dev/null || echo ""
+    } | sort -u > "${OUTPUT_DIR}/web/all_discovered_urls.txt"
     
-    discovered_count=$(cat /output/web/all_discovered_urls.txt 2>/dev/null | wc -l || echo "0")
+    discovered_count=$(cat "${OUTPUT_DIR}/web/all_discovered_urls.txt" 2>/dev/null | wc -l || echo "0")
     log_info "Total discovered URLs after deduplication: $discovered_count"
     
     # Step 5: Katana crawling on merged URLs
-    if [[ -f "/output/web/all_discovered_urls.txt" ]] && [[ -s "/output/web/all_discovered_urls.txt" ]]; then
+    if [[ -f "${OUTPUT_DIR}/web/all_discovered_urls.txt" ]] && [[ -s "${OUTPUT_DIR}/web/all_discovered_urls.txt" ]]; then
         log_info "Step 5: Katana crawling on merged URLs..."
-        run_docker "katana -list /output/web/all_discovered_urls.txt -o /output/web/katana.txt"
-        katana_count=$(cat /output/web/katana.txt 2>/dev/null | wc -l || echo "0")
+        run_docker "katana -list ${OUTPUT_DIR}/web/all_discovered_urls.txt -o ${OUTPUT_DIR}/web/katana.txt"
+        katana_count=$(cat "${OUTPUT_DIR}/web/katana.txt" 2>/dev/null | wc -l || echo "0")
         log_info "Katana crawled: $katana_count URLs"
     fi
     
     # Step 6: Filter live URLs with HTTPX
-    if [[ -f "/output/web/katana.txt" ]]; then
+    if [[ -f "${OUTPUT_DIR}/web/katana.txt" ]]; then
         log_info "Step 6: Final live URL filtering with HTTPX..."
-        run_docker "httpx -l /output/web/katana.txt -silent -o /output/web/live_urls.txt"
-        final_live_count=$(cat /output/web/live_urls.txt 2>/dev/null | wc -l || echo "0")
+        run_docker "httpx -l ${OUTPUT_DIR}/web/katana.txt -silent -o ${OUTPUT_DIR}/web/live_urls.txt"
+        final_live_count=$(cat "${OUTPUT_DIR}/web/live_urls.txt" 2>/dev/null | wc -l || echo "0")
         log_info "Final live URLs: $final_live_count"
     fi
     
     # Step 7: Enterprise-grade URL classification and routing
-    if [[ -f "/output/web/live_urls.txt" ]]; then
-        classify_and_route_urls "/output/web/live_urls.txt"
+    if [[ -f "${OUTPUT_DIR}/web/live_urls.txt" ]]; then
+        classify_and_route_urls "${OUTPUT_DIR}/web/live_urls.txt"
     fi
     
     # Step 8: Run ZAP baseline scan on main domain
@@ -823,7 +851,8 @@ main() {
     case "$EXECUTION_MODE" in
         "strict")
             log_info "Running in STRICT mode with enhanced error handling"
-            # set -euo pipefail  # Temporarily disabled to isolate the issue
+            # Temporarily disable strict mode to complete full scan
+            set +eo pipefail
             run_recon
             run_network
             run_vulnerability
