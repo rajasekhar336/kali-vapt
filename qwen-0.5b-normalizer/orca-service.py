@@ -59,10 +59,12 @@ def load_model():
     
     # Wait for Ollama to be ready
     import time
-    max_retries = 30
-    for i in range(max_retries):
+    MAX_RETRIES = 60
+    ollama_base = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+    
+    for i in range(MAX_RETRIES):
         try:
-            response = requests.get("http://localhost:11434/api/tags", timeout=5)
+            response = requests.get(f"{ollama_base}/api/tags", timeout=5)
             if response.status_code == 200:
                 logger.info("Ollama service is ready ✓")
                 use_mock_ai = False
@@ -189,7 +191,8 @@ def generate_remediation(normalized_finding):
         
         logger.info(f"Generating remediation for {normalized_finding.get('issue_type', 'unknown')}...")
         
-        response = requests.post("http://localhost:11434/api/generate", 
+        ollama_base = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+        response = requests.post(f"{ollama_base}/api/generate", 
                                    json={
                                        "model": "qwen:0.5b",
                                        "prompt": prompt,
@@ -232,13 +235,24 @@ def process_with_one_step_ai(tool_name, tool_output, target_domain):
         with open('/app/prompts/one_step_prompt.txt', 'r') as f:
             prompt_template = f.read()
         
+        # Convert tool_output to string if it's not already
+        if not isinstance(tool_output, str):
+            import json
+            try:
+                raw_input = json.dumps(tool_output)
+            except:
+                raw_input = str(tool_output)
+        else:
+            raw_input = tool_output
+            
         prompt = prompt_template.replace("{{TOOL}}", tool_name)\
                                .replace("{{TARGET}}", target_domain)\
-                               .replace("{{RAW}}", tool_output[:2000])  # Limit input
+                               .replace("{{RAW}}", raw_input[:2000])  # Limit input
         
         logger.info(f"Processing {tool_name} with one-step AI...")
         
-        response = requests.post("http://localhost:11434/api/generate", 
+        ollama_base = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+        response = requests.post(f"{ollama_base}/api/generate", 
                                    json={
                                        "model": "qwen:0.5b",
                                        "prompt": prompt,
@@ -273,7 +287,9 @@ def process_with_one_step_ai(tool_name, tool_output, target_domain):
             logger.warning("AI returned JSON but it failed schema validation; skipping")
         
     except Exception as e:
+        import traceback
         logger.error(f"One-step AI processing error: {e}")
+        logger.error(traceback.format_exc())
     
     return findings
 
@@ -286,13 +302,24 @@ def process_with_simple_ai(tool_name, tool_output, target_domain):
         with open('/app/prompts/simple_prompt.txt', 'r') as f:
             prompt_template = f.read()
         
+        # Convert tool_output to string if it's not already
+        if not isinstance(tool_output, str):
+            import json
+            try:
+                raw_input = json.dumps(tool_output)
+            except:
+                raw_input = str(tool_output)
+        else:
+            raw_input = tool_output
+
         prompt = prompt_template.replace("{{TOOL}}", tool_name)\
                                .replace("{{TARGET}}", target_domain)\
-                               .replace("{{RAW}}", tool_output[:1500])  # Limit input
+                               .replace("{{RAW}}", raw_input[:1500])  # Limit input
         
         logger.info(f"Processing {tool_name} with simple AI...")
         
-        response = requests.post("http://localhost:11434/api/generate", 
+        ollama_base = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+        response = requests.post(f"{ollama_base}/api/generate", 
                                    json={
                                        "model": "qwen:0.5b",
                                        "prompt": prompt,

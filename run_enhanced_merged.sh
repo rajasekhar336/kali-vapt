@@ -29,6 +29,7 @@ PORT_SCAN_TIMEOUT=600
 RATE_LIMIT=100
 DOCKER_CPU_LIMIT="1.5"
 DOCKER_MEMORY_LIMIT="2g"
+RUN_LOCAL=${RUN_LOCAL:-false}
 
 # Enterprise Integration Configuration
 QWEN_SERVICE="/var/production/qwen-0.5b-normalizer/qwen-0.5b-docker.sh"
@@ -386,17 +387,7 @@ classify_and_route_urls() {
         run_docker "httprobe -f /output/web/live_urls.txt -c 50 -o /output/web/httprobe.json 2>/dev/null || echo 'No httprobe results' > /output/web/httprobe.json"
     fi
     
-    # Nikto only on base URLs + folders
-    echo "https://${TARGET_DOMAIN}/" | cat - "${OUTPUT_DIR}/web/folder_urls.txt" 2>/dev/null | \
-    sort -u > "${OUTPUT_DIR}/web/nikto_targets.txt"
-    
-    if [[ -s "${OUTPUT_DIR}/web/nikto_targets.txt" ]]; then
-        log_info "Running Nikto on base URLs and folders..."
-        while read -r url; do
-            run_docker "nikto -h \"$url\" -o /output/web/nikto_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').htm -Format htm 2>/dev/null || touch /output/web/nikto_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').htm" &
-        done < "${OUTPUT_DIR}/web/nikto_targets.txt"
-        wait
-    fi
+    # Nikto logic moved to parallel execution block in run_web
     
     # ZAP on high-value HTML pages (limited set) - WITH NORMALIZATION
     head -10 "${OUTPUT_DIR}/web/html_pages.txt" > "${OUTPUT_DIR}/web/zap_targets.txt" 2>/dev/null || true
@@ -408,6 +399,29 @@ classify_and_route_urls() {
 # Docker wrapper function
 run_docker() {
     local cmd="$1"
+    
+    if [[ "$RUN_LOCAL" == "true" ]]; then
+        # Local execution mode (inside container)
+        # Replace /output with actual OUTPUT_DIR
+        local local_cmd=${cmd//\/output/${OUTPUT_DIR}}
+        
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "[DRY-RUN] (Local) bash -c '$local_cmd'"
+            return 0
+        fi
+        
+        # Ensure directories exist (redundant but safe)
+        mkdir -p "${OUTPUT_DIR}"/{recon,network,vuln,web,ssl,database,container}
+        
+        export TARGET_DOMAIN
+        log_info "Executing locally: $local_cmd"
+        bash -c "$local_cmd" || {
+             log_error "Command failed: $local_cmd"
+             return 1
+        }
+        return 0
+    fi
+
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "[DRY-RUN] docker run --rm -v ${OUTPUT_DIR}:/output $DOCKER_IMAGE bash -c '$cmd'"
         return 0
@@ -480,8 +494,15 @@ run_recon() {
     run_docker 'subfinder -d ${TARGET_DOMAIN} -o /output/recon/amass.txt 2>/dev/null || touch /output/recon/amass.txt' || true
     
     log_info "Running DNS reconnaissance..."
-    run_docker 'dig ${TARGET_DOMAIN} ANY > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt'
-    run_docker 'dnsrecon -d ${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo '{}' > /output/recon/dnsrecon.json'
+    # Try dnsx first, fall back to lagacy tools if not available or fails
+    if run_docker 'which dnsx >/dev/null'; then
+        log_info "Using dnsx for DNS recon..."
+        run_docker 'echo ${TARGET_DOMAIN} | dnsx -recon -wd ${TARGET_DOMAIN} -o /output/recon/dnsx.json -json 2>/dev/null || echo "{}" > /output/recon/dnsx.json'
+    else
+        log_warn "dnsx not found, falling back to dig/dnsrecon..."
+        run_docker 'dig ${TARGET_DOMAIN} ANY > /output/recon/dig.txt 2>/dev/null || touch /output/recon/dig.txt'
+        run_docker 'dnsrecon -d ${TARGET_DOMAIN} -j /output/recon/dnsrecon.json 2>/dev/null || echo "{}" > /output/recon/dnsrecon.json'
+    fi
     
     log_info "Running WhatWeb for technology detection..."
     run_docker "whatweb ${TARGET_DOMAIN} > /output/recon/whatweb.txt 2>/dev/null || touch /output/recon/whatweb.txt"
@@ -494,8 +515,8 @@ run_recon() {
     if [[ -f "${OUTPUT_DIR}/recon/amass.txt" ]] && [[ -s "${OUTPUT_DIR}/recon/amass.txt" ]]; then
         queue_tool_processing "amass" "${OUTPUT_DIR}/recon/amass.txt" "recon"
     fi
-    if [[ -f "${OUTPUT_DIR}/recon/dnsrecon.json" ]] && [[ -s "${OUTPUT_DIR}/recon/dnsrecon.json" ]]; then
-        queue_tool_processing "dnsrecon" "${OUTPUT_DIR}/recon/dnsrecon.json" "recon"
+    if [[ -f "${OUTPUT_DIR}/recon/dnsx.json" ]] && [[ -s "${OUTPUT_DIR}/recon/dnsx.json" ]]; then
+        queue_tool_processing "dnsx" "${OUTPUT_DIR}/recon/dnsx.json" "recon"
     fi
     if [[ -f "${OUTPUT_DIR}/recon/whatweb.txt" ]] && [[ -s "${OUTPUT_DIR}/recon/whatweb.txt" ]]; then
         queue_tool_processing "whatweb" "${OUTPUT_DIR}/recon/whatweb.txt" "recon"
@@ -590,34 +611,24 @@ run_web() {
     log_info "Starting Phase 4: WEB SECURITY with Enhanced Pipeline"
     
     # Step 1: Historical URL Discovery
-    log_info "Step 1: Historical URL Discovery (gau + waybackurls)..."
-    run_docker "gau ${TARGET_DOMAIN} | sort -u > /output/web/gau_urls.txt 2>/dev/null || echo 'No gau results' > /output/web/gau_urls.txt"
-    run_docker "waybackurls ${TARGET_DOMAIN} | sort -u >> /output/web/historical_urls.txt 2>/dev/null || echo 'No waybackurls results' > /output/web/historical_urls.txt"
+    log_info "Step 1: Historical URL Discovery (gau managed)..."
+    run_docker "gau ${TARGET_DOMAIN} --threads 5 | sort -u > /output/web/historical_urls.txt 2>/dev/null || echo 'No gau results' > /output/web/historical_urls.txt"
     
-    # Merge and deduplicate historical URLs
-    if [[ -f "/output/web/gau_urls.txt" ]] || [[ -f "/output/web/historical_urls.txt" ]]; then
-        cat /output/web/gau_urls.txt /output/web/historical_urls.txt 2>/dev/null | sort -u > /output/web/merged_historical.txt
-        log_info "Historical URL discovery completed: $(cat /output/web/merged_historical.txt 2>/dev/null | wc -l || echo "0") URLs"
-    fi
-    
-    # Step 2: Live URL Verification with httpx
-    if [[ -f "/output/web/merged_historical.txt" ]]; then
+    # Step 2: Live URL Verification with httpx (Enhanced)
+    if [[ -f "/output/web/historical_urls.txt" ]]; then
         log_info "Step 2: Live URL Verification with httpx..."
-        run_docker "httpx -l /output/web/merged_historical.txt -silent -o /output/web/historical_live.txt"
+        run_docker "httpx -l /output/web/historical_urls.txt -silent -follow-redirects -tech-detect -status-code -o /output/web/historical_live.txt"
         live_count=$(cat /output/web/historical_live.txt 2>/dev/null | wc -l || echo "0")
         log_info "httpx verified: $live_count live URLs from historical sources"
     fi
     
-    # Step 3: Directory & Path Discovery (Multi-tool approach)
-    log_info "Step 3: Multi-tool Directory & Path Discovery..."
+    # Step 3: Directory & Path Discovery (Optimized)
+    log_info "Step 3: Fast Directory & Path Discovery..."
     
-    # Feroxbuster
-    run_docker "feroxbuster -u https://${TARGET_DOMAIN} -w /opt/SecLists/Discovery/Web-Content/common.txt -o /output/web/feroxbuster.json --json 2>/dev/null || echo 'No feroxbuster' > /output/web/feroxbuster.json"
+    # Feroxbuster (High performance)
+    run_docker "feroxbuster -u https://${TARGET_DOMAIN} -w /opt/SecLists/Discovery/Web-Content/common.txt -t 50 -d 2 --no-state -o /output/web/feroxbuster.json --json 2>/dev/null || echo 'No feroxbuster' > /output/web/feroxbuster.json"
     
-    # Dirsearch
-    run_docker "python3 /opt/dirsearch/dirsearch.py -u https://${TARGET_DOMAIN} -o /output/web/dirsearch.json --json-output 2>/dev/null || echo 'No dirsearch results' > /output/web/dirsearch.json"
-    
-    # FFUF (directory fuzzing mode)
+    # FFUF (directory fuzzing mode) - Keeping as backup
     run_docker "ffuf -w /opt/SecLists/Discovery/Web-Content/common.txt -u https://${TARGET_DOMAIN}/FUZZ -o /output/web/ffuf_dir.json -of json 2>/dev/null || echo 'No ffuf results' > /output/web/ffuf_dir.json"
     
     # Step 4: Merge and deduplicate ALL discovery results
@@ -628,8 +639,8 @@ run_web() {
         # From feroxbuster
         [[ -f "${OUTPUT_DIR}/web/feroxbuster.json" ]] && jq -r 'select(.type == "response" and .status != 403) | .url' "${OUTPUT_DIR}/web/feroxbuster.json" 2>/dev/null || echo ""
         
-        # From dirsearch
-        [[ -f "${OUTPUT_DIR}/web/dirsearch.json" ]] && jq -r '.results[] | .target' "${OUTPUT_DIR}/web/dirsearch.json" 2>/dev/null || echo ""
+        # From dirsearch (Removed)
+        # [[ -f "${OUTPUT_DIR}/web/dirsearch.json" ]] && jq -r '.results[] | .target' "${OUTPUT_DIR}/web/dirsearch.json" 2>/dev/null || echo ""
         
         # From ffuf (directory mode)
         [[ -f "${OUTPUT_DIR}/web/ffuf_dir.json" ]] && jq -r '.results[] | .url' "${OUTPUT_DIR}/web/ffuf_dir.json" 2>/dev/null || echo ""
@@ -654,14 +665,42 @@ run_web() {
         log_info "Final live URLs: $final_live_count"
     fi
     
-    # Step 7: Enterprise-grade URL classification and routing
-    if [[ -f "${OUTPUT_DIR}/web/live_urls.txt" ]]; then
-        classify_and_route_urls "${OUTPUT_DIR}/web/live_urls.txt"
+    # Step 8: Parallel Execution of Heavy Scans
+    log_info "Step 8: Running heavy scans in parallel (WPScan, ZAP, Nikto)..."
+    
+    pids=()
+    
+    # 8a. WordPress scanning (if detected)
+    if [[ -f "/output/web/whatweb.txt" ]] && grep -qi "wordpress" "/output/web/whatweb.txt"; then
+        log_info "WordPress detected! Starting wpscan in background..."
+        (run_docker "wpscan --url https://${TARGET_DOMAIN} -o /output/web/wpscan.json 2>/dev/null || echo 'No WordPress vulnerabilities found' > /output/web/wpscan.json") &
+        pids+=($!)
     fi
     
-    # Step 8: Run ZAP baseline scan on main domain
-    log_info "Step 8: ZAP baseline scan on main domain..."
-    run_zap_scan "https://${TARGET_DOMAIN}" "baseline"
+    # 8b. ZAP baseline scan on main domain
+    log_info "Starting ZAP baseline scan in background..."
+    (run_zap_scan "https://${TARGET_DOMAIN}" "baseline") &
+    pids+=($!)
+    
+    # 8c. Nikto on base URLs + folders
+    echo "https://${TARGET_DOMAIN}/" | cat - "${OUTPUT_DIR}/web/folder_urls.txt" 2>/dev/null | \
+    sort -u > "${OUTPUT_DIR}/web/nikto_targets.txt"
+    
+    if [[ -s "${OUTPUT_DIR}/web/nikto_targets.txt" ]]; then
+        log_info "Starting Nikto scan in background..."
+        (
+            while read -r url; do
+                run_docker "nikto -h \"$url\" -o /output/web/nikto_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').htm -Format htm 2>/dev/null || touch /output/web/nikto_$(echo $url | sed 's|https://||g' | sed 's|/|_|g' | sed 's|/$||').htm"
+            done < "${OUTPUT_DIR}/web/nikto_targets.txt"
+        ) &
+        pids+=($!)
+    fi
+    
+    # Wait for all background jobs
+    log_info "Waiting for parallel scans to complete..."
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
     
     log_ok "Enhanced Web security assessment completed"
 }
@@ -829,8 +868,12 @@ main() {
 
     # Check Docker
     if ! command -v docker &> /dev/null; then
-        log_error "Docker is not installed"
-        exit 1
+        if [[ "$RUN_LOCAL" == "true" ]]; then
+            log_warn "Docker not found, but RUN_LOCAL is set. Proceeding with local execution."
+        else
+            log_error "Docker is not installed"
+            exit 1
+        fi
     fi
 
     # Initialize

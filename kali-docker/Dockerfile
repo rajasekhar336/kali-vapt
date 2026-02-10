@@ -45,6 +45,7 @@ RUN apt-get update && apt-get install -y python3-pip python3-venv pipx && \
 # -----------------------------
 RUN go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 RUN go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 RUN go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 RUN go install github.com/projectdiscovery/katana/cmd/katana@latest
 RUN go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest

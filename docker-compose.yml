@@ -15,6 +15,7 @@ services:
       - /var/log/qwen-0.5b:/app/logs
       - ollama_data:/root/.ollama
       - /var/log/output:/var/log/output
+      - ./qwen-0.5b-normalizer/orca-service.py:/app/orca-service.py
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -25,7 +26,7 @@ services:
     environment:
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
-      - OLLAMA_URL=http://127.0.0.1:11434
+      - OLLAMA_URL=http://ollama:11434
       - MODEL_PATH=/app/models
       - MAX_MEMORY=1800
       - TOKEN_LIMIT=512
@@ -45,6 +46,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - /var/log/detectdojo:/app/logs
+      - detectdojo_data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 30s
@@ -75,16 +77,16 @@ services:
       - detectdojo
 
 # Example Ollama service (optional). Recommended to run Ollama separately from the normalizer:
-# ollama:
-#   image: ollama/ollama:latest
-#   container_name: ollama
-#   ports:
-#     - "11434:11434"
-#   volumes:
-#     - ollama_data:/root/.ollama
-#   restart: unless-stopped
-#   networks:
-#     - vapt-network
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - vapt-network
 
 networks:
   vapt-network:
@@ -92,4 +94,6 @@ networks:
 
 volumes:
   ollama_data:
+    driver: local
+  detectdojo_data:
     driver: local

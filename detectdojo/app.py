@@ -61,48 +61,135 @@ app = Flask(__name__)
 
 
 # Global state
-
-FINDINGS_DB = {}  # {assessment_id: {target: str, findings: [], created_at: str}}
-
+DB_PATH = '/app/data/findings.db'
 NORMALIZER_URL = os.getenv('NORMALIZER_URL', 'http://127.0.0.1:8080')
 
+# ============ Database Initialization ============
+import sqlite3
 
+def init_db():
+    """Initialize SQLite database"""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Create tables
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS assessments (
+            assessment_id TEXT PRIMARY KEY,
+            target_domain TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    ''')
+    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            assessment_id TEXT,
+            tool_name TEXT,
+            title TEXT,
+            severity TEXT,
+            endpoint TEXT,
+            description TEXT,
+            remediation TEXT,
+            raw_output TEXT,
+            added_at TEXT,
+            finding_json TEXT, -- Store full JSON blob for flexibility
+            FOREIGN KEY(assessment_id) REFERENCES assessments(assessment_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Initialize on startup
+init_db()
 
 # ============ Helpers ============
 
-
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def get_assessment_id(target_domain):
-
-    """Generate or retrieve assessment ID for target"""
-
+    """Generate assessment ID for target"""
     safe_target = target_domain.replace('.', '_').replace(':', '_')
-
     return f"assessment_{safe_target}_{datetime.now().strftime('%Y%m%d')}"
 
-
-
 def get_or_create_assessment(target_domain):
-
     """Get or create assessment record"""
-
     assessment_id = get_assessment_id(target_domain)
+    
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute('SELECT * FROM assessments WHERE assessment_id = ?', (assessment_id,))
+    assessment = c.fetchone()
+    
+    if not assessment:
+        now = datetime.now().isoformat()
+        c.execute('INSERT INTO assessments (assessment_id, target_domain, created_at, updated_at) VALUES (?, ?, ?, ?)',
+                  (assessment_id, target_domain, now, now))
+        conn.commit()
+        
+        # Fetch again to return dict-like object
+        c.execute('SELECT * FROM assessments WHERE assessment_id = ?', (assessment_id,))
+        assessment = c.fetchone()
+    
+    conn.close()
+    return assessment_id, dict(assessment)
 
-    if assessment_id not in FINDINGS_DB:
+def add_findings_to_db(assessment_id, findings, tool_name):
+    """Add normalized findings to database"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    now = datetime.now().isoformat()
+    
+    for finding in findings:
+        c.execute('''
+            INSERT INTO findings (
+                assessment_id, tool_name, title, severity, endpoint, 
+                description, remediation, raw_output, added_at, finding_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            assessment_id,
+            tool_name,
+            finding.get('title', 'Unknown'),
+            finding.get('severity', 'medium'),
+            finding.get('endpoint', ''),
+            finding.get('description', ''),
+            finding.get('remediation', ''),
+            finding.get('raw_output', ''),
+            now,
+            json.dumps(finding)
+        ))
+        
+    # Update assessment timestamp
+    c.execute('UPDATE assessments SET updated_at = ? WHERE assessment_id = ?', (now, assessment_id))
+    
+    conn.commit()
+    conn.close()
 
-        FINDINGS_DB[assessment_id] = {
-
-            "target": target_domain,
-
-            "findings": [],
-
-            "created_at": datetime.now().isoformat(),
-
-            "updated_at": datetime.now().isoformat()
-
-        }
-
-    return assessment_id, FINDINGS_DB[assessment_id]
+def get_assessment_findings(assessment_id):
+    """Get all findings for an assessment"""
+    conn = get_db_connection()
+    c = conn.cursor()
+    
+    c.execute('SELECT finding_json FROM findings WHERE assessment_id = ?', (assessment_id,))
+    rows = c.fetchall()
+    
+    findings = []
+    for row in rows:
+        try:
+            findings.append(json.loads(row['finding_json']))
+        except:
+            continue
+            
+    conn.close()
+    return findings
 
 
 
@@ -283,209 +370,125 @@ def health():
 
 
 @app.route('/api/findings/add', methods=['POST'])
-
 def add_findings():
-
     """Receive raw tool outputs and normalize them"""
-
     try:
-
         data = request.get_json()
-
         if not data:
-
             return jsonify({"error": "No JSON data provided"}), 400
-
         
-
         tool_name = data.get('tool_name', 'unknown')
-
         tool_output = data.get('tool_output', '')
-
         target_domain = data.get('target_domain', 'unknown')
-
         
-
         if not tool_output:
-
             return jsonify({"error": "No tool_output provided"}), 400
-
         
-
         logger.info(f"Received {tool_name} output for {target_domain}")
-
         
-
         # Get or create assessment
-
         assessment_id, assessment = get_or_create_assessment(target_domain)
-
         
-
         # Send to normalizer
-
         normalized = normalize_tool_output(tool_name, tool_output, target_domain)
-
         
-
-        # Add to assessment
-
-        for finding in normalized:
-
-            finding['tool'] = tool_name
-
-            finding['added_at'] = datetime.now().isoformat()
-
-            assessment['findings'].append(finding)
-
+        # Add to assessment DB
+        add_findings_to_db(assessment_id, normalized, tool_name)
         
-
-        # Update timestamp
-
-        assessment['updated_at'] = datetime.now().isoformat()
-
+        # Get total findings for response
+        total_findings = len(get_assessment_findings(assessment_id))
         
-
-        logger.info(f"Assessment {assessment_id} now has {len(assessment['findings'])} total findings")
-
+        logger.info(f"Assessment {assessment_id} now has {total_findings} total findings")
         
-
         return jsonify({
-
             "success": True,
-
             "assessment_id": assessment_id,
-
             "normalized_count": len(normalized),
-
-            "total_findings": len(assessment['findings'])
-
+            "total_findings": total_findings
         })
-
     
-
     except Exception as e:
-
         logger.error(f"Error adding findings: {e}")
-
         return jsonify({"error": str(e)}), 500
 
 
 
 @app.route('/api/findings/<assessment_id>', methods=['GET'])
-
 def get_findings(assessment_id):
-
     """Get findings for an assessment"""
-
-    if assessment_id not in FINDINGS_DB:
-
+    # Check if assessment exists
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM assessments WHERE assessment_id = ?', (assessment_id,))
+    assessment_row = c.fetchone()
+    conn.close()
+    
+    if not assessment_row:
         return jsonify({"error": "Assessment not found"}), 404
-
     
-
-    assessment = FINDINGS_DB[assessment_id]
-
+    assessment = dict(assessment_row)
+    findings = get_assessment_findings(assessment_id)
     
-
     # Deduplicate
-
-    unique_findings = deduplicate_findings(assessment['findings'])
-
+    unique_findings = deduplicate_findings(findings)
     
-
     # Group by severity
-
     grouped = group_findings_by_severity(unique_findings)
-
     
-
     return jsonify({
-
         "assessment_id": assessment_id,
-
-        "target": assessment['target'],
-
+        "target": assessment['target_domain'],
         "created_at": assessment['created_at'],
-
         "updated_at": assessment['updated_at'],
-
         "findings": unique_findings,
-
         "grouped_by_severity": grouped,
-
         "total_findings": len(unique_findings),
-
         "by_severity": {k: len(v) for k, v in grouped.items()}
-
     })
 
 
 
 @app.route('/api/report/<assessment_id>', methods=['GET'])
-
 def get_report(assessment_id):
-
     """Generate comprehensive security report"""
-
-    if assessment_id not in FINDINGS_DB:
-
+    # Check if assessment exists
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM assessments WHERE assessment_id = ?', (assessment_id,))
+    assessment_row = c.fetchone()
+    conn.close()
+    
+    if not assessment_row:
         return jsonify({"error": "Assessment not found"}), 404
-
     
-
-    assessment = FINDINGS_DB[assessment_id]
-
-    unique_findings = deduplicate_findings(assessment['findings'])
-
+    assessment = dict(assessment_row)
+    findings = get_assessment_findings(assessment_id)
+    
+    unique_findings = deduplicate_findings(findings)
     grouped = group_findings_by_severity(unique_findings)
-
     security_score = calculate_security_score(unique_findings)
-
     
-
     # Build report
-
     report = {
-
         "assessment_id": assessment_id,
-
-        "target": assessment['target'],
-
+        "target": assessment['target_domain'],
         "created_at": assessment['created_at'],
-
         "updated_at": assessment['updated_at'],
-
         "security_score": security_score,
-
         "rating": "CRITICAL" if security_score < 40 else "HIGH" if security_score < 60 else "MEDIUM" if security_score < 80 else "LOW",
-
         "summary": {
-
             "total_findings": len(unique_findings),
-
             "critical": len(grouped.get('critical', [])),
-
             "high": len(grouped.get('high', [])),
-
             "medium": len(grouped.get('medium', [])),
-
             "low": len(grouped.get('low', [])),
-
             "info": len(grouped.get('info', []))
-
         },
-
         "findings": unique_findings,
-
         "findings_by_severity": grouped,
-
         "top_issues": [
-
             f["title"] for f in sorted(unique_findings, key=lambda x: {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}.get(x.get('severity', 'medium'), 5))[:10]
-
         ]
-
     }
 
     
@@ -495,60 +498,54 @@ def get_report(assessment_id):
 
 
 @app.route('/api/assessments', methods=['GET'])
-
 def list_assessments():
-
     """List all assessments"""
-
-    assessments = []
-
-    for assessment_id, data in FINDINGS_DB.items():
-
-        unique_findings = deduplicate_findings(data['findings'])
-
-        assessments.append({
-
-            "assessment_id": assessment_id,
-
-            "target": data['target'],
-
-            "created_at": data['created_at'],
-
-            "updated_at": data['updated_at'],
-
-            "findings_count": len(unique_findings),
-
-            "security_score": calculate_security_score(unique_findings)
-
-        })
-
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM assessments ORDER BY updated_at DESC')
+    rows = c.fetchall()
+    conn.close()
     
-
+    assessments = []
+    for row in rows:
+        assessment = dict(row)
+        assessment_id = assessment['assessment_id']
+        findings = get_assessment_findings(assessment_id)
+        unique_findings = deduplicate_findings(findings)
+        
+        assessments.append({
+            "assessment_id": assessment_id,
+            "target": assessment['target_domain'],
+            "created_at": assessment['created_at'],
+            "updated_at": assessment['updated_at'],
+            "findings_count": len(unique_findings),
+            "security_score": calculate_security_score(unique_findings)
+        })
+    
     return jsonify({
-
         "assessments": assessments,
-
         "total": len(assessments)
-
     })
 
 
 
 @app.route('/api/report/<assessment_id>/html', methods=['GET'])
-
 def get_report_html(assessment_id):
-
     """Generate HTML report"""
-
-    if assessment_id not in FINDINGS_DB:
-
-        return "Assessment not found", 404
-
+    # Check if assessment exists
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM assessments WHERE assessment_id = ?', (assessment_id,))
+    assessment_row = c.fetchone()
+    conn.close()
     
-
-    assessment = FINDINGS_DB[assessment_id]
-
-    unique_findings = deduplicate_findings(assessment['findings'])
+    if not assessment_row:
+        return "Assessment not found", 404
+    
+    assessment = dict(assessment_row)
+    findings = get_assessment_findings(assessment_id)
+    
+    unique_findings = deduplicate_findings(findings)
 
     grouped = group_findings_by_severity(unique_findings)
 
@@ -567,9 +564,7 @@ def get_report_html(assessment_id):
     <html>
 
     <head>
-
-        <title>VAPT Report - {assessment['target']}</title>
-
+        <title>VAPT Report - {assessment['target_domain']}</title>
         <style>
 
             body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
@@ -611,13 +606,9 @@ def get_report_html(assessment_id):
     <body>
 
         <div class="header">
-
             <h1>VAPT Assessment Report</h1>
-
-            <p><strong>Target:</strong> {assessment['target']}</p>
-
+            <p><strong>Target:</strong> {assessment['target_domain']}</p>
             <p><strong>Date:</strong> {assessment['created_at']}</p>
-
         </div>
 
         
