@@ -46,6 +46,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - /var/log/detectdojo:/app/logs
+      - ./detectdojo:/app
       - detectdojo_data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]

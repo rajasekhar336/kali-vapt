@@ -149,23 +149,24 @@ def add_findings_to_db(assessment_id, findings, tool_name):
     now = datetime.now().isoformat()
     
     for finding in findings:
-        c.execute('''
-            INSERT INTO findings (
-                assessment_id, tool_name, title, severity, endpoint, 
-                description, remediation, raw_output, added_at, finding_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
+        params = (
             assessment_id,
             tool_name,
             finding.get('title', 'Unknown'),
             finding.get('severity', 'medium'),
             finding.get('endpoint', ''),
-            finding.get('description', ''),
-            finding.get('remediation', ''),
-            finding.get('raw_output', ''),
+            str(finding.get('description', '')) if isinstance(finding.get('description'), (str, int, float, bool)) else json.dumps(finding.get('description')),
+            str(finding.get('remediation', '')) if isinstance(finding.get('remediation'), (str, int, float, bool)) else json.dumps(finding.get('remediation')),
+            str(finding.get('raw_output', '')) if isinstance(finding.get('raw_output'), (str, int, float, bool)) else json.dumps(finding.get('raw_output')),
             now,
             json.dumps(finding)
-        ))
+        )
+        c.execute('''
+            INSERT INTO findings (
+                assessment_id, tool_name, title, severity, endpoint, 
+                description, remediation, raw_output, added_at, finding_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', params)
         
     # Update assessment timestamp
     c.execute('UPDATE assessments SET updated_at = ? WHERE assessment_id = ?', (now, assessment_id))

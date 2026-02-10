@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y \
     feroxbuster \
     net-tools \
     ca-certificates \
+    bsdextrautils \
+    trivy \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,6 +58,7 @@ RUN go install github.com/ffuf/ffuf@latest
 RUN go install github.com/tomnomnom/gf@latest
 RUN go install github.com/tomnomnom/qsreplace@latest
 RUN go install github.com/hahwul/dalfox/v2@latest
+RUN go install github.com/Shopify/kubeaudit@latest
 
 # -----------------------------
 # Dirsearch
